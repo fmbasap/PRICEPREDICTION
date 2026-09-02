@@ -933,6 +933,10 @@ function LiquidationPanel({ symbol, accent }) {
         </div>
       )}
 
+      <div style={{ ...styles.posNote, marginTop: 4 }}>
+        수신 메시지: Binance {msgCounts.binance}건 / Bybit {msgCounts.bybit}건
+      </div>
+
       {total > 0 ? (
         <div style={{ marginTop: 12 }}>
           <div style={styles.splitBar}>
@@ -958,11 +962,7 @@ function LiquidationPanel({ symbol, accent }) {
         </div>
       ) : (
         anyLive && (
-          <div style={{ ...styles.posNote, marginTop: 8 }}>
-            아직 감지된 청산이 없습니다. (수신 메시지: Binance {msgCounts.binance}건 / Bybit {msgCounts.bybit}건 — 이
-            숫자가 0에서 안 늘면 연결은 됐지만 데이터가 안 들어오는 것이고, 늘어나는데 청산 건수만 0이면 진짜
-            조용한 구간인 것입니다.)
-          </div>
+          <div style={{ ...styles.posNote, marginTop: 8 }}>아직 감지된 청산이 없습니다.</div>
         )
       )}
     </section>
