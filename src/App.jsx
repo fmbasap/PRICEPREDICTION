@@ -1132,10 +1132,10 @@ function PredictionMarketPanel() {
     setLoading(true);
     setError(null);
     try {
-      const url = "https://gamma-api.polymarket.com/public-search?q=XRP&events_status=active&limit_per_type=15";
+      const url = "/api/polymarket?q=XRP";
       const res = await fetch(url);
-      if (!res.ok) throw new Error(`예측시장 조회에 실패했습니다 (${res.status})`);
       const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || `예측시장 조회에 실패했습니다 (${res.status})`);
       const events = data.events || [];
 
       const items = [];
