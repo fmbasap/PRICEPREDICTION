@@ -10,6 +10,7 @@ import {
   ReferenceLine,
 } from "recharts";
 import { RefreshCw, TrendingUp, TrendingDown, Minus, AlertTriangle } from "lucide-react";
+import { supabase } from "./supabaseClient";
 
 const ASSETS = {
   FLR: { id: "flare-networks", label: "Flare", ticker: "FLR", accent: "#E8A33D", currency: "usd", futuresSymbol: "FLRUSDT" },
@@ -471,8 +472,8 @@ export default function CryptoTrendDashboard() {
             <section style={styles.chartCard}>
               <div style={styles.chartLegend}>
                 <LegendItem color={meta.accent} label="가격" />
-                <LegendItem color="#8B948E" label={tfConf.fastLabel} dashed />
-                <LegendItem color="#5B6660" label={tfConf.slowLabel} dashed />
+                <LegendItem color="#5B9BD5" label={tfConf.fastLabel} dashed />
+                <LegendItem color="#B388EB" label={tfConf.slowLabel} dashed />
                 <LegendItem color="#EDEAE3" label={`추세 연장선(${tfConf.forwardLabel})`} dotted />
               </div>
               <ResponsiveContainer width="100%" height={280}>
@@ -503,8 +504,8 @@ export default function CryptoTrendDashboard() {
                     stroke="#5B6660"
                     strokeDasharray="2 2"
                   />
-                  <Line type="monotone" dataKey="smaSlow" stroke="#5B6660" strokeWidth={1.25} dot={false} strokeDasharray="4 3" connectNulls />
-                  <Line type="monotone" dataKey="smaFast" stroke="#8B948E" strokeWidth={1.25} dot={false} strokeDasharray="4 3" connectNulls />
+                  <Line type="monotone" dataKey="smaSlow" stroke="#B388EB" strokeWidth={1.25} dot={false} strokeDasharray="4 3" connectNulls />
+                  <Line type="monotone" dataKey="smaFast" stroke="#5B9BD5" strokeWidth={1.25} dot={false} strokeDasharray="4 3" connectNulls />
                   <Line type="monotone" dataKey="price" stroke={meta.accent} strokeWidth={2} dot={false} connectNulls />
                   <Line type="monotone" dataKey="projection" stroke="#EDEAE3" strokeWidth={1.5} strokeDasharray="1 3" dot={false} connectNulls />
                 </ComposedChart>
@@ -684,24 +685,92 @@ function LiquidationPanel({ symbol, accent }) {
   const [status, setStatus] = useState("connecting"); // connecting | live | disconnected
   const [startedAt, setStartedAt] = useState(null);
   const [lastEvent, setLastEvent] = useState(null);
+  const [sharedMode, setSharedMode] = useState(!!supabase);
+  const [updatedAt, setUpdatedAt] = useState(null);
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
 
-  const reset = useCallback(() => {
-    setStats({ longUsd: 0, longCount: 0, shortUsd: 0, shortCount: 0 });
-    setStartedAt(new Date());
-    setLastEvent(null);
-  }, []);
+  // Supabase에 저장된 공유 누적치를 불러오고, 실시간 변경을 구독
+  useEffect(() => {
+    if (!supabase) {
+      setSharedMode(false);
+      return;
+    }
+    let cancelled = false;
+
+    const applyRow = (row) => {
+      if (!row || cancelled) return;
+      setStats({
+        longUsd: Number(row.long_usd) || 0,
+        longCount: Number(row.long_count) || 0,
+        shortUsd: Number(row.short_usd) || 0,
+        shortCount: Number(row.short_count) || 0,
+      });
+      setUpdatedAt(row.updated_at ? new Date(row.updated_at) : new Date());
+    };
+
+    (async () => {
+      const { data } = await supabase.from("liquidation_totals").select("*").eq("symbol", symbol).maybeSingle();
+      applyRow(data);
+    })();
+
+    const channel = supabase
+      .channel(`liq_${symbol}`)
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "liquidation_totals", filter: `symbol=eq.${symbol}` },
+        (payload) => applyRow(payload.new)
+      )
+      .subscribe();
+
+    return () => {
+      cancelled = true;
+      supabase.removeChannel(channel);
+    };
+  }, [symbol]);
 
   useEffect(() => {
     let cancelled = false;
+
+    const recordLiquidation = async (isLongLiquidation, usd) => {
+      setLastEvent({ isLongLiquidation, usd, time: new Date() });
+      if (supabase) {
+        // 공유 DB에 안전하게 더하기만 함 (다른 기기 값을 덮어쓰지 않음)
+        const { error } = await supabase.rpc("increment_liquidation", {
+          p_symbol: symbol,
+          p_is_long: isLongLiquidation,
+          p_usd: usd,
+        });
+        if (error) {
+          // 공유 저장 실패 시 이 기기에서만이라도 보이도록 로컬 폴백
+          setStats((prev) =>
+            isLongLiquidation
+              ? { ...prev, longUsd: prev.longUsd + usd, longCount: prev.longCount + 1 }
+              : { ...prev, shortUsd: prev.shortUsd + usd, shortCount: prev.shortCount + 1 }
+          );
+        }
+      } else {
+        setStats((prev) =>
+          isLongLiquidation
+            ? { ...prev, longUsd: prev.longUsd + usd, longCount: prev.longCount + 1 }
+            : { ...prev, shortUsd: prev.shortUsd + usd, shortCount: prev.shortCount + 1 }
+        );
+      }
+    };
 
     const connect = () => {
       if (cancelled) return;
       setStatus("connecting");
       const streamSymbol = symbol.toLowerCase();
-      // 2026년 3월 Binance 웹소켓 구조 개편: forceOrder(청산)는 /market 티어로 라우팅됨
-      const ws = new WebSocket(`wss://fstream.binance.com/market/ws/${streamSymbol}@forceOrder`);
+      let ws;
+      try {
+        // 2026년 3월 Binance 웹소켓 구조 개편: forceOrder(청산)는 /market 티어로 라우팅됨
+        ws = new WebSocket(`wss://fstream.binance.com/market/ws/${streamSymbol}@forceOrder`);
+      } catch {
+        setStatus("disconnected");
+        reconnectTimerRef.current = setTimeout(connect, 5000);
+        return;
+      }
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -720,12 +789,7 @@ function LiquidationPanel({ symbol, accent }) {
           const price = parseFloat(o.ap || o.p);
           const usd = qty * price;
           const isLongLiquidation = o.S === "SELL"; // 강제 매도 = 롱 포지션 청산
-          setStats((prev) =>
-            isLongLiquidation
-              ? { ...prev, longUsd: prev.longUsd + usd, longCount: prev.longCount + 1 }
-              : { ...prev, shortUsd: prev.shortUsd + usd, shortCount: prev.shortCount + 1 }
-          );
-          setLastEvent({ isLongLiquidation, usd, time: new Date() });
+          recordLiquidation(isLongLiquidation, usd);
         } catch {
           // 파싱 실패는 무시
         }
@@ -765,16 +829,23 @@ function LiquidationPanel({ symbol, accent }) {
   return (
     <section style={styles.newsCard}>
       <div style={styles.newsHeader}>
-        <div style={styles.tableTitle}>실시간 청산 추적</div>
+        <div style={styles.tableTitle}>
+          실시간 청산 추적 {sharedMode && <span style={styles.newsTimestamp}>(전체 기기 합산)</span>}
+        </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <span style={{ ...styles.liveDot, background: statusMeta.color }} />
           <span style={{ ...styles.newsTimestamp, color: statusMeta.color }}>{statusMeta.label}</span>
-          <button onClick={reset} style={styles.newsBtn}>초기화</button>
         </div>
       </div>
 
       <div style={styles.newsEmpty}>
-        {startedAt ? `${elapsedMin}분째 추적 중 (탭을 연 시점부터 누적, 과거 데이터는 포함되지 않습니다)` : "연결 대기 중…"}
+        {sharedMode
+          ? updatedAt
+            ? `모든 기기에서 감지한 청산이 합산되어 표시됩니다 (마지막 갱신: ${updatedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })})`
+            : "공유 데이터를 불러오는 중…"
+          : startedAt
+          ? `${elapsedMin}분째 이 기기에서만 추적 중 (Supabase 미연결)`
+          : "연결 대기 중…"}
       </div>
 
       {total > 0 ? (
@@ -951,7 +1022,8 @@ function PositioningPanel({ symbol, accent }) {
 
           <div style={{ gridColumn: "1 / -1", ...styles.posNote }}>
             OI 증가는 신규 롱·숏이 동시에 매칭되며 생긴 것으로, 어느 한쪽만 늘었다는 뜻이 아닙니다. 테이커
-            매수/매도 비율은 시장가로 적극적으로 체결된 방향을 보여주는 보조 지표입니다.
+            매수/매도 비율은 시장가로 적극적으로 체결된 방향을 보여주는 보조 지표입니다 (1보다 크면 매수 우세,
+            작으면 매도 우세 — 짧은 구간 지표라 노이즈가 큽니다).
           </div>
         </div>
       )}
