@@ -577,6 +577,8 @@ export default function CryptoTrendDashboard() {
 
             {(asset === "XRP" || asset === "FLR") && <NewsPanel key={asset} assetKey={asset} />}
 
+            {asset === "XRP" && <PredictionMarketPanel />}
+
             <footer style={styles.disclaimer}>
               이 화면의 추세 연장선은 최근 구간의 가격 흐름을 단순 선형 회귀로 연장한 통계적 참고선이며,
               실제 미래 가격을 예측하지 않습니다. 뉴스 기반 심리 섹션도 최신 검색 결과를 요약한 참고
@@ -1120,6 +1122,152 @@ function PositioningPanel({ symbol, accent }) {
   );
 }
 
+function PredictionMarketPanel() {
+  const [markets, setMarkets] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [fetchedAt, setFetchedAt] = useState(null);
+
+  const fetchMarkets = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const url = "https://gamma-api.polymarket.com/public-search?q=XRP&events_status=active&limit_per_type=15";
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`예측시장 조회에 실패했습니다 (${res.status})`);
+      const data = await res.json();
+      const events = data.events || [];
+
+      const items = [];
+      events.forEach((ev) => {
+        (ev.markets || []).forEach((m) => {
+          if (m.closed || m.active === false) return;
+          let outcomes = [];
+          let prices = [];
+          try {
+            outcomes = JSON.parse(m.outcomes || "[]");
+          } catch {
+            outcomes = [];
+          }
+          try {
+            prices = JSON.parse(m.outcomePrices || "[]");
+          } catch {
+            prices = [];
+          }
+          if (!outcomes.length || !prices.length || outcomes.length !== prices.length) return;
+
+          let maxIdx = 0;
+          prices.forEach((p, i) => {
+            if (parseFloat(p) > parseFloat(prices[maxIdx])) maxIdx = i;
+          });
+
+          items.push({
+            id: m.id,
+            question: m.question || ev.title,
+            slug: ev.slug,
+            leadingOutcome: outcomes[maxIdx],
+            probability: parseFloat(prices[maxIdx]) * 100,
+            volume: parseFloat(m.volumeNum || m.volume || 0),
+            endDate: m.endDate,
+          });
+        });
+      });
+
+      // 중복 제거(같은 질문이 여러 이벤트에 겹치는 경우) + 거래량 순 정렬
+      const seen = new Set();
+      const deduped = items.filter((it) => {
+        if (seen.has(it.id)) return false;
+        seen.add(it.id);
+        return true;
+      });
+      deduped.sort((a, b) => b.volume - a.volume);
+
+      setMarkets(deduped.slice(0, 6));
+      setFetchedAt(new Date());
+    } catch (e) {
+      setError(e.message || "예측시장 데이터를 불러오지 못했습니다");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fmtEndDate = (iso) => {
+    if (!iso) return null;
+    const d = new Date(iso);
+    return `${d.getMonth() + 1}/${d.getDate()} 마감`;
+  };
+
+  return (
+    <section style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>예측시장 전망 (Polymarket)</div>
+        <button onClick={fetchMarkets} style={styles.newsBtn} disabled={loading}>
+          <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
+          {loading ? "조회 중…" : markets ? "다시 조회" : "불러오기"}
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ ...styles.errorBox, marginBottom: 0 }}>
+          <AlertTriangle size={14} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {!markets && !loading && !error && (
+        <div style={styles.newsEmpty}>
+          버튼을 눌러 Polymarket에서 실제 베팅이 걸린 XRP 관련 예측시장을 가져옵니다. 확률은 애널리스트 의견이
+          아니라 실제 돈을 건 트레이더들의 집단 예측입니다.
+        </div>
+      )}
+
+      {markets && markets.length === 0 && (
+        <div style={styles.newsEmpty}>현재 조건에 맞는 활성 XRP 예측시장을 찾지 못했습니다.</div>
+      )}
+
+      {markets && markets.length > 0 && (
+        <>
+          <div style={styles.pmList}>
+            {markets.map((m) => (
+              <a
+                key={m.id}
+                href={m.slug ? `https://polymarket.com/event/${m.slug}` : "https://polymarket.com"}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={styles.pmRow}
+              >
+                <div style={styles.pmQuestion}>{m.question}</div>
+                <div style={styles.pmMetaRow}>
+                  <span
+                    style={{
+                      ...styles.pmProbability,
+                      color: m.probability >= 50 ? "#6FCB9F" : "#E2604F",
+                    }}
+                  >
+                    {m.leadingOutcome} {m.probability.toFixed(0)}%
+                  </span>
+                  <span style={styles.pmMetaSub}>
+                    ${(m.volume / 1000).toFixed(0)}K 거래량{m.endDate ? ` · ${fmtEndDate(m.endDate)}` : ""}
+                  </span>
+                </div>
+                <div style={styles.pmBar}>
+                  <div style={{ ...styles.pmBarFill, width: `${m.probability}%` }} />
+                </div>
+              </a>
+            ))}
+          </div>
+          {fetchedAt && (
+            <div style={{ ...styles.newsTimestamp, marginTop: 8 }}>
+              {fetchedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 조회 · 탭하면 Polymarket
+              페이지로 이동
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 function NewsPanel({ assetKey }) {
   const [news, setNews] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -1388,6 +1536,49 @@ const styles = {
     flexWrap: "wrap",
     marginBottom: 10,
     paddingLeft: 6,
+  },
+  pmList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 14,
+  },
+  pmRow: {
+    display: "block",
+    textDecoration: "none",
+    paddingBottom: 12,
+    borderBottom: "1px solid #232B27",
+  },
+  pmQuestion: {
+    fontSize: 13,
+    color: "#EDEAE3",
+    lineHeight: 1.5,
+    marginBottom: 6,
+  },
+  pmMetaRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 6,
+  },
+  pmProbability: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 13,
+    fontWeight: 600,
+  },
+  pmMetaSub: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 10,
+    color: "#5B6660",
+  },
+  pmBar: {
+    height: 4,
+    borderRadius: 2,
+    background: "#232B27",
+    overflow: "hidden",
+  },
+  pmBarFill: {
+    height: "100%",
+    background: "#5B9BD5",
   },
   newsCard: {
     background: "#171D1A",
