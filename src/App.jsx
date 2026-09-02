@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   ComposedChart,
   Line,
@@ -12,8 +12,8 @@ import {
 import { RefreshCw, TrendingUp, TrendingDown, Minus, AlertTriangle } from "lucide-react";
 
 const ASSETS = {
-  FLR: { id: "flare-networks", label: "Flare", ticker: "FLR", accent: "#E8A33D", currency: "usd" },
-  XRP: { id: "ripple", label: "XRP", ticker: "XRP", accent: "#4FD1C5", currency: "usd" },
+  FLR: { id: "flare-networks", label: "Flare", ticker: "FLR", accent: "#E8A33D", currency: "usd", futuresSymbol: "FLRUSDT" },
+  XRP: { id: "ripple", label: "XRP", ticker: "XRP", accent: "#4FD1C5", currency: "usd", futuresSymbol: "XRPUSDT" },
 };
 
 const TIMEFRAMES = {
@@ -128,6 +128,56 @@ function fmtLabel(ts, mode) {
     return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:00`;
   }
   return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
+// ---- 예측 정확도 기록 (브라우저 localStorage에 저장) ----
+function predLogKey(asset, timeframe) {
+  return `predlog_v1_${asset}_${timeframe}`;
+}
+
+function loadPredLog(asset, timeframe) {
+  try {
+    const raw = localStorage.getItem(predLogKey(asset, timeframe));
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePredLog(asset, timeframe, log) {
+  try {
+    localStorage.setItem(predLogKey(asset, timeframe), JSON.stringify(log.slice(-100)));
+  } catch {
+    // 저장 실패(용량 초과 등)는 조용히 무시
+  }
+}
+
+// 지나간 목표 시점에 대해, 그 시점에 가장 가까운 실제 가격을 찾아 오차를 채워 넣는다
+function resolvePredLog(log, rawPrices, toleranceMs) {
+  if (!rawPrices || rawPrices.length === 0) return { log, changed: false };
+  let changed = false;
+  const now = Date.now();
+  const nextLog = log.map((batch) => {
+    const targets = batch.targets.map((t) => {
+      if (t.resolved || t.ts > now) return t;
+      let nearestPrice = null;
+      let nearestDiff = Infinity;
+      for (const [ts, price] of rawPrices) {
+        const diff = Math.abs(ts - t.ts);
+        if (diff < nearestDiff) {
+          nearestDiff = diff;
+          nearestPrice = price;
+        }
+      }
+      if (nearestPrice != null && nearestDiff <= toleranceMs) {
+        changed = true;
+        return { ...t, actual: nearestPrice, resolved: true };
+      }
+      return t;
+    });
+    return { ...batch, targets };
+  });
+  return { log: nextLog, changed };
 }
 
 export default function CryptoTrendDashboard() {
@@ -307,6 +357,42 @@ export default function CryptoTrendDashboard() {
   const meta = ASSETS[asset];
   const tfConf = TIMEFRAMES[timeframe];
 
+  // ---- 예측 정확도 기록: 새 추세 연장선이 계산될 때마다 스냅샷 저장 + 지나간 예측 검증 ----
+  const [predLog, setPredLog] = useState([]);
+  const lastSavedKeyRef = useRef(null);
+
+  useEffect(() => {
+    if (!analysis || !cache[asset]) return;
+
+    let log = loadPredLog(asset, timeframe);
+    const { log: resolvedLog, changed: resolveChanged } = resolvePredLog(log, cache[asset], tfConf.unitMs);
+    log = resolvedLog;
+
+    const fetchKey = `${asset}_${timeframe}_${lastUpdated ? lastUpdated.getTime() : 0}`;
+    let appendChanged = false;
+    if (lastSavedKeyRef.current !== fetchKey) {
+      lastSavedKeyRef.current = fetchKey;
+      const lastBatch = log[log.length - 1];
+      // 최소 저장 간격: 시간별=10분, 일별=1일
+      const MIN_SAVE_INTERVAL_MS = timeframe === "hourly" ? 10 * 60 * 1000 : 24 * 60 * 60 * 1000;
+      const canAppend = !lastBatch || Date.now() - lastBatch.createdAt >= MIN_SAVE_INTERVAL_MS;
+      if (canAppend) {
+        const targets = analysis.chartData
+          .filter((d) => d.projection != null && d.price == null)
+          .map((d) => ({ ts: d.ts, predicted: d.projection, actual: null, resolved: false }));
+        if (targets.length > 0) {
+          log = [...log, { createdAt: Date.now(), basePrice: analysis.currentPrice, targets }];
+          appendChanged = true;
+        }
+      }
+    }
+
+    if (resolveChanged || appendChanged) {
+      savePredLog(asset, timeframe, log);
+    }
+    setPredLog(log);
+  }, [analysis, cache, asset, timeframe, lastUpdated, tfConf]);
+
   return (
     <div style={styles.page}>
       <style>{FONT_IMPORT}</style>
@@ -461,6 +547,8 @@ export default function CryptoTrendDashboard() {
               </table>
             </section>
 
+            <PredictionAccuracyCard log={predLog} timeframe={timeframe} />
+
             <section style={styles.signalGrid}>
               <SignalCard
                 title="이동평균 교차"
@@ -482,7 +570,11 @@ export default function CryptoTrendDashboard() {
               />
             </section>
 
-            {asset === "XRP" && <NewsPanel />}
+            <PositioningPanel key={`pos-${asset}`} symbol={meta.futuresSymbol} accent={meta.accent} />
+
+            <LiquidationPanel key={`liq-${asset}`} symbol={meta.futuresSymbol} accent={meta.accent} />
+
+            {(asset === "XRP" || asset === "FLR") && <NewsPanel key={asset} assetKey={asset} />}
 
             <footer style={styles.disclaimer}>
               이 화면의 추세 연장선은 최근 구간의 가격 흐름을 단순 선형 회귀로 연장한 통계적 참고선이며,
@@ -502,7 +594,372 @@ export default function CryptoTrendDashboard() {
   );
 }
 
-function NewsPanel() {
+function PredictionAccuracyCard({ log, timeframe }) {
+  const resolved = log.flatMap((batch) =>
+    batch.targets.filter((t) => t.resolved).map((t) => ({ ...t, createdAt: batch.createdAt }))
+  );
+  const pendingCount = log.reduce((sum, b) => sum + b.targets.filter((t) => !t.resolved).length, 0);
+  const recent = [...resolved].sort((a, b) => b.ts - a.ts).slice(0, 8);
+
+  const errors = resolved.map((t) => ((t.actual - t.predicted) / t.predicted) * 100);
+  const mape = errors.length ? errors.reduce((a, b) => a + Math.abs(b), 0) / errors.length : null;
+  const bias = errors.length ? errors.reduce((a, b) => a + b, 0) / errors.length : null;
+
+  return (
+    <section style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>예측 정확도 기록</div>
+        {pendingCount > 0 && <div style={styles.newsTimestamp}>검증 대기 {pendingCount}건</div>}
+      </div>
+
+      {resolved.length === 0 ? (
+        <div style={styles.newsEmpty}>
+          아직 검증된 예측이 없습니다. 추세 연장선이 가리켰던 미래 시점이 실제로 지나야 비교할 수 있어요. 이 화면을
+          다시 열 때마다 자동으로 쌓입니다.
+        </div>
+      ) : (
+        <>
+          <div style={styles.posGrid}>
+            <div>
+              <div style={styles.posLabel}>평균 절대오차 (MAPE)</div>
+              <div style={styles.posValue}>{mape.toFixed(2)}%</div>
+              <div style={styles.posSub}>{resolved.length}건 검증됨</div>
+            </div>
+            <div>
+              <div style={styles.posLabel}>평균 편향</div>
+              <div style={{ ...styles.posValue, color: bias >= 0 ? "#6FCB9F" : "#E2604F" }}>
+                {bias >= 0 ? "+" : ""}
+                {bias.toFixed(2)}%
+              </div>
+              <div style={styles.posSub}>{bias >= 0 ? "추세선이 실제보다 낮게 잡는 경향" : "추세선이 실제보다 높게 잡는 경향"}</div>
+            </div>
+          </div>
+
+          <table style={{ ...styles.table, marginTop: 14 }}>
+            <thead>
+              <tr>
+                <th style={styles.th}>목표시점</th>
+                <th style={{ ...styles.th, textAlign: "right" }}>예측가</th>
+                <th style={{ ...styles.th, textAlign: "right" }}>실제가</th>
+                <th style={{ ...styles.th, textAlign: "right" }}>오차</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recent.map((t, i) => {
+                const err = ((t.actual - t.predicted) / t.predicted) * 100;
+                return (
+                  <tr key={i} style={i % 2 === 1 ? styles.trAlt : undefined}>
+                    <td style={styles.td}>{fmtLabel(t.ts, timeframe)}</td>
+                    <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(t.predicted)}</td>
+                    <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(t.actual)}</td>
+                    <td
+                      style={{
+                        ...styles.td,
+                        textAlign: "right",
+                        color: err >= 0 ? "#6FCB9F" : "#E2604F",
+                      }}
+                    >
+                      {err >= 0 ? "+" : ""}
+                      {err.toFixed(2)}%
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      <div style={{ ...styles.posNote, marginTop: 10 }}>
+        새 예측은 최소 {timeframe === "hourly" ? "10분" : "1일"} 간격으로만 저장됩니다 (새로고침을 여러 번 해도
+        중복 저장되지 않습니다). 이 기기(브라우저)에만 저장되며, 다른 기기나 시크릿 모드에서는 기록이 보이지
+        않아요.
+      </div>
+    </section>
+  );
+}
+
+function LiquidationPanel({ symbol, accent }) {
+  const [stats, setStats] = useState({ longUsd: 0, longCount: 0, shortUsd: 0, shortCount: 0 });
+  const [status, setStatus] = useState("connecting"); // connecting | live | disconnected
+  const [startedAt, setStartedAt] = useState(null);
+  const [lastEvent, setLastEvent] = useState(null);
+  const wsRef = useRef(null);
+  const reconnectTimerRef = useRef(null);
+
+  const reset = useCallback(() => {
+    setStats({ longUsd: 0, longCount: 0, shortUsd: 0, shortCount: 0 });
+    setStartedAt(new Date());
+    setLastEvent(null);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const connect = () => {
+      if (cancelled) return;
+      setStatus("connecting");
+      const streamSymbol = symbol.toLowerCase();
+      // 2026년 3월 Binance 웹소켓 구조 개편: forceOrder(청산)는 /market 티어로 라우팅됨
+      const ws = new WebSocket(`wss://fstream.binance.com/market/ws/${streamSymbol}@forceOrder`);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (cancelled) return;
+        setStatus("live");
+        setStartedAt((prev) => prev || new Date());
+      };
+
+      ws.onmessage = (msg) => {
+        if (cancelled) return;
+        try {
+          const data = JSON.parse(msg.data);
+          const o = data.o;
+          if (!o) return;
+          const qty = parseFloat(o.q);
+          const price = parseFloat(o.ap || o.p);
+          const usd = qty * price;
+          const isLongLiquidation = o.S === "SELL"; // 강제 매도 = 롱 포지션 청산
+          setStats((prev) =>
+            isLongLiquidation
+              ? { ...prev, longUsd: prev.longUsd + usd, longCount: prev.longCount + 1 }
+              : { ...prev, shortUsd: prev.shortUsd + usd, shortCount: prev.shortCount + 1 }
+          );
+          setLastEvent({ isLongLiquidation, usd, time: new Date() });
+        } catch {
+          // 파싱 실패는 무시
+        }
+      };
+
+      ws.onerror = () => {
+        if (cancelled) return;
+        setStatus("disconnected");
+      };
+
+      ws.onclose = () => {
+        if (cancelled) return;
+        setStatus("disconnected");
+        reconnectTimerRef.current = setTimeout(connect, 4000);
+      };
+    };
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, [symbol]);
+
+  const total = stats.longUsd + stats.shortUsd;
+  const longPct = total > 0 ? (stats.longUsd / total) * 100 : 50;
+  const elapsedMin = startedAt ? Math.max(1, Math.round((Date.now() - startedAt.getTime()) / 60000)) : 0;
+
+  const statusMeta = {
+    connecting: { label: "연결 중…", color: "#8B948E" },
+    live: { label: "실시간 수신 중", color: "#6FCB9F" },
+    disconnected: { label: "연결 끊김 (재시도 중)", color: "#E2604F" },
+  }[status];
+
+  return (
+    <section style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>실시간 청산 추적</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ ...styles.liveDot, background: statusMeta.color }} />
+          <span style={{ ...styles.newsTimestamp, color: statusMeta.color }}>{statusMeta.label}</span>
+          <button onClick={reset} style={styles.newsBtn}>초기화</button>
+        </div>
+      </div>
+
+      <div style={styles.newsEmpty}>
+        {startedAt ? `${elapsedMin}분째 추적 중 (탭을 연 시점부터 누적, 과거 데이터는 포함되지 않습니다)` : "연결 대기 중…"}
+      </div>
+
+      {total > 0 ? (
+        <div style={{ marginTop: 12 }}>
+          <div style={styles.splitBar}>
+            <div style={{ ...styles.splitBarLong, width: `${longPct.toFixed(1)}%` }} />
+          </div>
+          <div style={styles.posSplitRow}>
+            <span style={{ color: "#6FCB9F" }}>
+              롱 청산 ${(stats.longUsd / 1000).toFixed(1)}K ({stats.longCount}건)
+            </span>
+            <span style={{ color: "#E2604F" }}>
+              숏 청산 ${(stats.shortUsd / 1000).toFixed(1)}K ({stats.shortCount}건)
+            </span>
+          </div>
+          {lastEvent && (
+            <div style={{ ...styles.posNote, marginTop: 10 }}>
+              최근: {lastEvent.time.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}{" "}
+              <span style={{ color: lastEvent.isLongLiquidation ? "#E2604F" : "#6FCB9F" }}>
+                {lastEvent.isLongLiquidation ? "롱 청산" : "숏 청산"}
+              </span>{" "}
+              ${lastEvent.usd.toFixed(0)}
+            </div>
+          )}
+        </div>
+      ) : (
+        status === "live" && <div style={{ ...styles.posNote, marginTop: 8 }}>아직 감지된 청산이 없습니다.</div>
+      )}
+    </section>
+  );
+}
+
+function PositioningPanel({ symbol, accent }) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const fetchPositioning = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [premiumRes, oiRes, ratioRes, oiHistRes, takerRes] = await Promise.all([
+        fetch(`https://fapi.binance.com/fapi/v1/premiumIndex?symbol=${symbol}`),
+        fetch(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${symbol}`),
+        fetch(`https://fapi.binance.com/futures/data/globalLongShortAccountRatio?symbol=${symbol}&period=5m&limit=1`),
+        fetch(`https://fapi.binance.com/futures/data/openInterestHist?symbol=${symbol}&period=1h&limit=2`),
+        fetch(`https://fapi.binance.com/futures/data/takerlongshortRatio?symbol=${symbol}&period=5m&limit=1`),
+      ]);
+      if (!premiumRes.ok || !oiRes.ok || !ratioRes.ok) {
+        throw new Error("이 자산은 선물 데이터가 없습니다");
+      }
+      const premium = await premiumRes.json();
+      const oi = await oiRes.json();
+      const ratioArr = await ratioRes.json();
+      const ratio = Array.isArray(ratioArr) ? ratioArr[0] : null;
+
+      let oiChangePct = null;
+      if (oiHistRes.ok) {
+        const oiHist = await oiHistRes.json();
+        if (Array.isArray(oiHist) && oiHist.length >= 2) {
+          const prev = parseFloat(oiHist[0].sumOpenInterest);
+          const curr = parseFloat(oiHist[oiHist.length - 1].sumOpenInterest);
+          if (prev > 0) oiChangePct = ((curr - prev) / prev) * 100;
+        }
+      }
+
+      let takerBuyRatio = null;
+      if (takerRes.ok) {
+        const takerArr = await takerRes.json();
+        const taker = Array.isArray(takerArr) ? takerArr[0] : null;
+        if (taker) takerBuyRatio = parseFloat(taker.buySellRatio);
+      }
+
+      setData({
+        markPrice: parseFloat(premium.markPrice),
+        fundingRate: parseFloat(premium.lastFundingRate),
+        openInterestQty: parseFloat(oi.openInterest),
+        oiChangePct,
+        longAccount: ratio ? parseFloat(ratio.longAccount) : null,
+        shortAccount: ratio ? parseFloat(ratio.shortAccount) : null,
+        longShortRatio: ratio ? parseFloat(ratio.longShortRatio) : null,
+        takerBuyRatio,
+      });
+    } catch (e) {
+      setError(e.message || "선물 데이터를 불러오지 못했습니다");
+      setData(null);
+    } finally {
+      setLoading(false);
+    }
+  }, [symbol]);
+
+  useEffect(() => {
+    fetchPositioning();
+  }, [fetchPositioning]);
+
+  const fundingColor = data && data.fundingRate >= 0 ? "#6FCB9F" : "#E2604F";
+  const oiUsd = data && data.markPrice ? data.openInterestQty * data.markPrice : null;
+
+  return (
+    <section style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>포지셔닝 (선물 · Binance)</div>
+        <button onClick={fetchPositioning} style={styles.newsBtn} disabled={loading}>
+          <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
+          갱신
+        </button>
+      </div>
+
+      {loading && !data && !error && <div style={styles.newsEmpty}>선물 데이터를 불러오는 중…</div>}
+
+      {error && (
+        <div style={{ ...styles.errorBox, marginBottom: 0 }}>
+          <AlertTriangle size={14} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {data && (
+        <div style={styles.posGrid}>
+          <div>
+            <div style={styles.posLabel}>펀딩비 (8h)</div>
+            <div style={{ ...styles.posValue, color: fundingColor }}>
+              {data.fundingRate >= 0 ? "+" : ""}
+              {(data.fundingRate * 100).toFixed(4)}%
+            </div>
+            <div style={styles.posSub}>{data.fundingRate >= 0 ? "롱 → 숏 지불 (롱 우세)" : "숏 → 롱 지불 (숏 우세)"}</div>
+          </div>
+
+          <div>
+            <div style={styles.posLabel}>미결제약정(OI)</div>
+            <div style={{ ...styles.posValue, color: accent }}>
+              {oiUsd != null ? `$${(oiUsd / 1_000_000).toFixed(1)}M` : "-"}
+            </div>
+            <div style={styles.posSub}>
+              {data.openInterestQty.toLocaleString("ko-KR", { maximumFractionDigits: 0 })} {symbol.replace("USDT", "")}
+              {data.oiChangePct != null && (
+                <span style={{ color: data.oiChangePct >= 0 ? "#6FCB9F" : "#E2604F", marginLeft: 6 }}>
+                  ({data.oiChangePct >= 0 ? "+" : ""}
+                  {data.oiChangePct.toFixed(2)}% / 1h)
+                </span>
+              )}
+            </div>
+          </div>
+
+          {data.takerBuyRatio != null && (
+            <div>
+              <div style={styles.posLabel}>테이커 매수/매도 비율 (5m)</div>
+              <div
+                style={{
+                  ...styles.posValue,
+                  color: data.takerBuyRatio >= 1 ? "#6FCB9F" : "#E2604F",
+                }}
+              >
+                {data.takerBuyRatio.toFixed(2)}
+              </div>
+              <div style={styles.posSub}>{data.takerBuyRatio >= 1 ? "시장가 매수 우세" : "시장가 매도 우세"}</div>
+            </div>
+          )}
+
+          {data.longAccount != null && (
+            <div style={{ gridColumn: "1 / -1" }}>
+              <div style={styles.posLabel}>
+                롱/숏 계정 비율 {data.longShortRatio != null && `(${data.longShortRatio.toFixed(2)} : 1)`}
+              </div>
+              <div style={styles.splitBar}>
+                <div style={{ ...styles.splitBarLong, width: `${(data.longAccount * 100).toFixed(1)}%` }} />
+              </div>
+              <div style={styles.posSplitRow}>
+                <span style={{ color: "#6FCB9F" }}>롱 {(data.longAccount * 100).toFixed(1)}%</span>
+                <span style={{ color: "#E2604F" }}>숏 {(data.shortAccount * 100).toFixed(1)}%</span>
+              </div>
+            </div>
+          )}
+
+          <div style={{ gridColumn: "1 / -1", ...styles.posNote }}>
+            OI 증가는 신규 롱·숏이 동시에 매칭되며 생긴 것으로, 어느 한쪽만 늘었다는 뜻이 아닙니다. 테이커
+            매수/매도 비율은 시장가로 적극적으로 체결된 방향을 보여주는 보조 지표입니다.
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function NewsPanel({ assetKey }) {
   const [news, setNews] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -512,39 +969,9 @@ function NewsPanel() {
     setLoading(true);
     setError(null);
     try {
-      const prompt = `당신은 암호화폐 뉴스 분석가입니다. 웹 검색으로 지난 24~48시간 이내의 XRP(리플) 관련
-최신 뉴스를 조사하세요. 가격, 규제, 파트너십, 소송 등 시장 심리에 영향을 줄 만한 소식을 우선하세요.
-
-조사 후 아래 JSON 형식으로만 답하세요. 설명, 마크다운 코드블록, 다른 텍스트 없이 순수 JSON만 출력하세요.
-헤드라인은 원문을 그대로 인용하지 말고 본인 언어로 짧게 바꿔 쓰세요.
-
-{
-  "sentiment": "positive 또는 neutral 또는 negative 중 하나",
-  "summary": "2~3문장의 한국어 요약. 지금 분위기와 핵심 이유.",
-  "headlines": [
-    { "title": "짧게 바꿔쓴 헤드라인", "source": "출처명" }
-  ]
-}`;
-
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1200,
-          messages: [{ role: "user", content: prompt }],
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
-        }),
-      });
-
-      if (!response.ok) throw new Error(`뉴스 조회에 실패했습니다 (${response.status})`);
-      const data = await response.json();
-      const fullText = (data.content || [])
-        .map((block) => (block.type === "text" ? block.text : ""))
-        .filter(Boolean)
-        .join("\n");
-      const clean = fullText.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(clean);
+      const response = await fetch(`/api/news?asset=${encodeURIComponent(assetKey)}`);
+      const parsed = await response.json();
+      if (!response.ok || parsed.error) throw new Error(parsed.error || `뉴스 조회에 실패했습니다 (${response.status})`);
       setNews(parsed);
       setFetchedAt(new Date());
     } catch (e) {
@@ -554,12 +981,16 @@ function NewsPanel() {
     }
   };
 
-  const sentimentMeta = {
-    positive: { label: "긍정적", color: "#6FCB9F" },
-    neutral: { label: "중립", color: "#8B948E" },
-    negative: { label: "부정적", color: "#E2604F" },
+  const scoreColor = (score) => {
+    if (score >= 67) return "#6FCB9F";
+    if (score <= 33) return "#E2604F";
+    return "#8B948E";
   };
-  const sm = news ? sentimentMeta[news.sentiment] || sentimentMeta.neutral : null;
+  const scoreLabel = (score) => {
+    if (score >= 67) return "긍정적";
+    if (score <= 33) return "부정적";
+    return "중립";
+  };
 
   return (
     <section style={styles.newsCard}>
@@ -580,34 +1011,33 @@ function NewsPanel() {
 
       {!news && !loading && !error && (
         <div style={styles.newsEmpty}>
-          버튼을 눌러 최근 24~48시간 XRP 관련 뉴스를 검색하고 시장 심리를 요약합니다.
+          버튼을 눌러 최근 24~48시간 {assetKey} 관련 뉴스를 검색하고 분위기를 0~100 점수로 요약합니다.
         </div>
       )}
 
       {news && (
         <>
-          <div style={styles.newsSentimentRow}>
-            <span style={{ ...styles.sentimentPill, color: sm.color, borderColor: sm.color }}>{sm.label}</span>
-            {fetchedAt && (
-              <span style={styles.newsTimestamp}>
-                {fetchedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 조회
-              </span>
-            )}
+          <div style={styles.gaugeRow}>
+            <div style={{ ...styles.gaugeScore, color: scoreColor(news.score) }}>{news.score}</div>
+            <div style={styles.gaugeMeta}>
+              <span style={{ ...styles.gaugeLabel, color: scoreColor(news.score) }}>{scoreLabel(news.score)}</span>
+              {fetchedAt && (
+                <span style={styles.newsTimestamp}>
+                  {fetchedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 조회
+                </span>
+              )}
+            </div>
+          </div>
+          <div style={styles.gaugeTrack}>
+            <div style={styles.gaugeTrackFill} />
+            <div style={{ ...styles.gaugeMarker, left: `${news.score}%` }} />
+          </div>
+          <div style={styles.gaugeScaleRow}>
+            <span>부정 0</span>
+            <span>중립 50</span>
+            <span>긍정 100</span>
           </div>
           <p style={styles.newsSummary}>{news.summary}</p>
-          {news.headlines && news.headlines.length > 0 && (
-            <ul style={styles.newsList}>
-              {news.headlines.map((h, i) => (
-                <li key={i} style={styles.newsListItem}>
-                  <span style={styles.newsListDot}>·</span>
-                  <span>
-                    {h.title}
-                    {h.source && <span style={styles.newsSource}> — {h.source}</span>}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
         </>
       )}
     </section>
@@ -850,20 +1280,6 @@ const styles = {
     color: "#5B6660",
     lineHeight: 1.6,
   },
-  newsSentimentRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-    marginBottom: 10,
-  },
-  sentimentPill: {
-    fontFamily: "IBM Plex Mono, monospace",
-    fontSize: 11,
-    fontWeight: 600,
-    border: "1px solid",
-    borderRadius: 20,
-    padding: "3px 12px",
-  },
   newsTimestamp: {
     fontFamily: "IBM Plex Mono, monospace",
     fontSize: 10,
@@ -873,30 +1289,112 @@ const styles = {
     fontSize: 13,
     lineHeight: 1.7,
     color: "#EDEAE3",
-    margin: "0 0 12px 0",
-  },
-  newsList: {
-    listStyle: "none",
     margin: 0,
-    padding: 0,
-    display: "flex",
-    flexDirection: "column",
-    gap: 6,
   },
-  newsListItem: {
-    display: "flex",
-    gap: 6,
-    fontSize: 12,
-    lineHeight: 1.5,
-    color: "#C7CCC8",
+  liveDot: {
+    width: 6,
+    height: 6,
+    borderRadius: "50%",
+    display: "inline-block",
   },
-  newsListDot: {
+  posNote: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 10,
     color: "#5B6660",
+    lineHeight: 1.6,
+    marginTop: 4,
   },
-  newsSource: {
+  posGrid: {
+    display: "grid",
+    gridTemplateColumns: "1fr 1fr",
+    gap: 16,
+  },
+  posLabel: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 10,
     color: "#5B6660",
+    marginBottom: 6,
+  },
+  posValue: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 18,
+    fontWeight: 600,
+    marginBottom: 4,
+  },
+  posSub: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 10,
+    color: "#8B948E",
+  },
+  splitBar: {
+    position: "relative",
+    height: 8,
+    borderRadius: 4,
+    background: "#E2604F",
+    overflow: "hidden",
+    marginBottom: 6,
+    marginTop: 4,
+  },
+  splitBarLong: {
+    position: "absolute",
+    left: 0,
+    top: 0,
+    bottom: 0,
+    background: "#6FCB9F",
+  },
+  posSplitRow: {
+    display: "flex",
+    justifyContent: "space-between",
     fontFamily: "IBM Plex Mono, monospace",
     fontSize: 11,
+    fontWeight: 600,
+  },
+  gaugeRow: {
+    display: "flex",
+    alignItems: "baseline",
+    gap: 12,
+    marginBottom: 10,
+  },
+  gaugeScore: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 32,
+    fontWeight: 600,
+  },
+  gaugeMeta: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 2,
+  },
+  gaugeLabel: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 12,
+    fontWeight: 600,
+  },
+  gaugeTrack: {
+    position: "relative",
+    height: 6,
+    borderRadius: 3,
+    marginBottom: 6,
+    background: "linear-gradient(90deg, #E2604F 0%, #8B948E 50%, #6FCB9F 100%)",
+  },
+  gaugeTrackFill: {
+    display: "none",
+  },
+  gaugeMarker: {
+    position: "absolute",
+    top: -3,
+    width: 2,
+    height: 12,
+    background: "#EDEAE3",
+    transform: "translateX(-1px)",
+  },
+  gaugeScaleRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 9,
+    color: "#5B6660",
+    marginBottom: 12,
   },
   tableCard: {
     background: "#171D1A",
