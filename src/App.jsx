@@ -482,12 +482,13 @@ export default function CryptoTrendDashboard() {
               />
             </section>
 
+            {asset === "XRP" && <NewsPanel />}
+
             <footer style={styles.disclaimer}>
               이 화면의 추세 연장선은 최근 구간의 가격 흐름을 단순 선형 회귀로 연장한 통계적 참고선이며,
-              실제 미래 가격을 예측하지 않습니다. 삼성전자는 한국 장 운영시간(평일 09:00~15:30)에만
-              데이터가 갱신되므로, 시간별 보기에서 장 마감 후에는 값이 그대로 유지될 수 있습니다.
-              암호화폐·주식 가격은 다수의 예측 불가능한 변수에 좌우되며, 이 도구는 투자 자문이 아닙니다.
-              데이터 출처: CoinGecko, Yahoo Finance.
+              실제 미래 가격을 예측하지 않습니다. 뉴스 기반 심리 섹션도 최신 검색 결과를 요약한 참고
+              자료일 뿐, 가격 예측이 아닙니다. 암호화폐 가격은 다수의 예측 불가능한 변수에 좌우되며,
+              이 도구는 투자 자문이 아닙니다. 데이터 출처: CoinGecko.
             </footer>
           </>
         )}
@@ -498,6 +499,118 @@ export default function CryptoTrendDashboard() {
         * { box-sizing: border-box; }
       `}</style>
     </div>
+  );
+}
+
+function NewsPanel() {
+  const [news, setNews] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [fetchedAt, setFetchedAt] = useState(null);
+
+  const fetchNews = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const prompt = `당신은 암호화폐 뉴스 분석가입니다. 웹 검색으로 지난 24~48시간 이내의 XRP(리플) 관련
+최신 뉴스를 조사하세요. 가격, 규제, 파트너십, 소송 등 시장 심리에 영향을 줄 만한 소식을 우선하세요.
+
+조사 후 아래 JSON 형식으로만 답하세요. 설명, 마크다운 코드블록, 다른 텍스트 없이 순수 JSON만 출력하세요.
+헤드라인은 원문을 그대로 인용하지 말고 본인 언어로 짧게 바꿔 쓰세요.
+
+{
+  "sentiment": "positive 또는 neutral 또는 negative 중 하나",
+  "summary": "2~3문장의 한국어 요약. 지금 분위기와 핵심 이유.",
+  "headlines": [
+    { "title": "짧게 바꿔쓴 헤드라인", "source": "출처명" }
+  ]
+}`;
+
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1200,
+          messages: [{ role: "user", content: prompt }],
+          tools: [{ type: "web_search_20250305", name: "web_search" }],
+        }),
+      });
+
+      if (!response.ok) throw new Error(`뉴스 조회에 실패했습니다 (${response.status})`);
+      const data = await response.json();
+      const fullText = (data.content || [])
+        .map((block) => (block.type === "text" ? block.text : ""))
+        .filter(Boolean)
+        .join("\n");
+      const clean = fullText.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(clean);
+      setNews(parsed);
+      setFetchedAt(new Date());
+    } catch (e) {
+      setError(e.message || "뉴스를 불러오지 못했습니다");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const sentimentMeta = {
+    positive: { label: "긍정적", color: "#6FCB9F" },
+    neutral: { label: "중립", color: "#8B948E" },
+    negative: { label: "부정적", color: "#E2604F" },
+  };
+  const sm = news ? sentimentMeta[news.sentiment] || sentimentMeta.neutral : null;
+
+  return (
+    <section style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>뉴스 기반 심리</div>
+        <button onClick={fetchNews} style={styles.newsBtn} disabled={loading}>
+          <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
+          {loading ? "검색 중…" : news ? "다시 조회" : "뉴스 불러오기"}
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ ...styles.errorBox, marginBottom: 0 }}>
+          <AlertTriangle size={14} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {!news && !loading && !error && (
+        <div style={styles.newsEmpty}>
+          버튼을 눌러 최근 24~48시간 XRP 관련 뉴스를 검색하고 시장 심리를 요약합니다.
+        </div>
+      )}
+
+      {news && (
+        <>
+          <div style={styles.newsSentimentRow}>
+            <span style={{ ...styles.sentimentPill, color: sm.color, borderColor: sm.color }}>{sm.label}</span>
+            {fetchedAt && (
+              <span style={styles.newsTimestamp}>
+                {fetchedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 조회
+              </span>
+            )}
+          </div>
+          <p style={styles.newsSummary}>{news.summary}</p>
+          {news.headlines && news.headlines.length > 0 && (
+            <ul style={styles.newsList}>
+              {news.headlines.map((h, i) => (
+                <li key={i} style={styles.newsListItem}>
+                  <span style={styles.newsListDot}>·</span>
+                  <span>
+                    {h.title}
+                    {h.source && <span style={styles.newsSource}> — {h.source}</span>}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </section>
   );
 }
 
@@ -704,6 +817,86 @@ const styles = {
     flexWrap: "wrap",
     marginBottom: 10,
     paddingLeft: 6,
+  },
+  newsCard: {
+    background: "#171D1A",
+    border: "1px solid #232B27",
+    borderRadius: 10,
+    padding: "14px 16px",
+    marginBottom: 16,
+  },
+  newsHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 10,
+  },
+  newsBtn: {
+    display: "flex",
+    alignItems: "center",
+    gap: 5,
+    background: "transparent",
+    border: "1px solid #232B27",
+    color: "#8B948E",
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 10,
+    padding: "5px 9px",
+    borderRadius: 6,
+    cursor: "pointer",
+  },
+  newsEmpty: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 11,
+    color: "#5B6660",
+    lineHeight: 1.6,
+  },
+  newsSentimentRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    marginBottom: 10,
+  },
+  sentimentPill: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 11,
+    fontWeight: 600,
+    border: "1px solid",
+    borderRadius: 20,
+    padding: "3px 12px",
+  },
+  newsTimestamp: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 10,
+    color: "#5B6660",
+  },
+  newsSummary: {
+    fontSize: 13,
+    lineHeight: 1.7,
+    color: "#EDEAE3",
+    margin: "0 0 12px 0",
+  },
+  newsList: {
+    listStyle: "none",
+    margin: 0,
+    padding: 0,
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+  },
+  newsListItem: {
+    display: "flex",
+    gap: 6,
+    fontSize: 12,
+    lineHeight: 1.5,
+    color: "#C7CCC8",
+  },
+  newsListDot: {
+    color: "#5B6660",
+  },
+  newsSource: {
+    color: "#5B6660",
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 11,
   },
   tableCard: {
     background: "#171D1A",
