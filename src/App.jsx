@@ -10,7 +10,7 @@ import {
   ReferenceLine,
 } from "recharts";
 import { RefreshCw, TrendingUp, TrendingDown, Minus, AlertTriangle } from "lucide-react";
-import { supabase } from "./supabaseClient";
+import { supabase, supabaseDebugInfo } from "./supabaseClient";
 
 const ASSETS = {
   FLR: { id: "flare-networks", label: "Flare", ticker: "FLR", accent: "#E8A33D", currency: "usd", futuresSymbol: "FLRUSDT" },
@@ -844,7 +844,7 @@ function LiquidationPanel({ symbol, accent }) {
             ? `모든 기기에서 감지한 청산이 합산되어 표시됩니다 (마지막 갱신: ${updatedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })})`
             : "공유 데이터를 불러오는 중…"
           : startedAt
-          ? `${elapsedMin}분째 이 기기에서만 추적 중 (Supabase 미연결)`
+          ? `${elapsedMin}분째 이 기기에서만 추적 중 (Supabase 미연결 — ${supabaseDebugInfo})`
           : "연결 대기 중…"}
       </div>
 
