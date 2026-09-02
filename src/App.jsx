@@ -986,11 +986,6 @@ function NewsPanel({ assetKey }) {
     if (score <= 33) return "#E2604F";
     return "#8B948E";
   };
-  const scoreLabel = (score) => {
-    if (score >= 67) return "긍정적";
-    if (score <= 33) return "부정적";
-    return "중립";
-  };
 
   return (
     <section style={styles.newsCard}>
@@ -1016,29 +1011,14 @@ function NewsPanel({ assetKey }) {
       )}
 
       {news && (
-        <>
-          <div style={styles.gaugeRow}>
-            <div style={{ ...styles.gaugeScore, color: scoreColor(news.score) }}>{news.score}</div>
-            <div style={styles.gaugeMeta}>
-              <span style={{ ...styles.gaugeLabel, color: scoreColor(news.score) }}>{scoreLabel(news.score)}</span>
-              {fetchedAt && (
-                <span style={styles.newsTimestamp}>
-                  {fetchedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 조회
-                </span>
-              )}
-            </div>
-          </div>
-          <div style={styles.gaugeTrack}>
-            <div style={styles.gaugeTrackFill} />
-            <div style={{ ...styles.gaugeMarker, left: `${news.score}%` }} />
-          </div>
-          <div style={styles.gaugeScaleRow}>
-            <span>부정 0</span>
-            <span>중립 50</span>
-            <span>긍정 100</span>
-          </div>
-          <p style={styles.newsSummary}>{news.summary}</p>
-        </>
+        <div style={styles.gaugeRow}>
+          <div style={{ ...styles.gaugeScore, color: scoreColor(news.score) }}>{news.score}</div>
+          {fetchedAt && (
+            <span style={styles.newsTimestamp}>
+              {fetchedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 조회
+            </span>
+          )}
+        </div>
       )}
     </section>
   );
@@ -1351,9 +1331,9 @@ const styles = {
   },
   gaugeRow: {
     display: "flex",
-    alignItems: "baseline",
-    gap: 12,
-    marginBottom: 10,
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: 4,
   },
   gaugeScore: {
     fontFamily: "IBM Plex Mono, monospace",
