@@ -682,13 +682,16 @@ function PredictionAccuracyCard({ log, timeframe }) {
 
 function LiquidationPanel({ symbol, accent }) {
   const [stats, setStats] = useState({ longUsd: 0, longCount: 0, shortUsd: 0, shortCount: 0 });
-  const [status, setStatus] = useState("connecting"); // connecting | live | disconnected
+  const [exchangeStatus, setExchangeStatus] = useState({ binance: "connecting", bybit: "connecting" });
   const [startedAt, setStartedAt] = useState(null);
   const [lastEvent, setLastEvent] = useState(null);
+  const [msgCounts, setMsgCounts] = useState({ binance: 0, bybit: 0 });
+  const [rpcDebug, setRpcDebug] = useState({ success: 0, error: 0, lastError: null });
   const [sharedMode, setSharedMode] = useState(!!supabase);
   const [updatedAt, setUpdatedAt] = useState(null);
-  const wsRef = useRef(null);
-  const reconnectTimerRef = useRef(null);
+  const wsRefs = useRef({});
+  const reconnectTimers = useRef({});
+  const pingTimers = useRef({});
 
   // Supabase에 저장된 공유 누적치를 불러오고, 실시간 변경을 구독
   useEffect(() => {
@@ -732,6 +735,10 @@ function LiquidationPanel({ symbol, accent }) {
   useEffect(() => {
     let cancelled = false;
 
+    const setStatusFor = (exchange, value) => {
+      setExchangeStatus((prev) => ({ ...prev, [exchange]: value }));
+    };
+
     const recordLiquidation = async (isLongLiquidation, usd) => {
       setLastEvent({ isLongLiquidation, usd, time: new Date() });
       if (supabase) {
@@ -742,12 +749,15 @@ function LiquidationPanel({ symbol, accent }) {
           p_usd: usd,
         });
         if (error) {
+          setRpcDebug((prev) => ({ success: prev.success, error: prev.error + 1, lastError: error.message }));
           // 공유 저장 실패 시 이 기기에서만이라도 보이도록 로컬 폴백
           setStats((prev) =>
             isLongLiquidation
               ? { ...prev, longUsd: prev.longUsd + usd, longCount: prev.longCount + 1 }
               : { ...prev, shortUsd: prev.shortUsd + usd, shortCount: prev.shortCount + 1 }
           );
+        } else {
+          setRpcDebug((prev) => ({ ...prev, success: prev.success + 1 }));
         }
       } else {
         setStats((prev) =>
@@ -758,29 +768,31 @@ function LiquidationPanel({ symbol, accent }) {
       }
     };
 
-    const connect = () => {
+    // ---- Binance ----
+    const connectBinance = () => {
       if (cancelled) return;
-      setStatus("connecting");
+      setStatusFor("binance", "connecting");
       const streamSymbol = symbol.toLowerCase();
       let ws;
       try {
         // 2026년 3월 Binance 웹소켓 구조 개편: forceOrder(청산)는 /market 티어로 라우팅됨
         ws = new WebSocket(`wss://fstream.binance.com/market/ws/${streamSymbol}@forceOrder`);
       } catch {
-        setStatus("disconnected");
-        reconnectTimerRef.current = setTimeout(connect, 5000);
+        setStatusFor("binance", "disconnected");
+        reconnectTimers.current.binance = setTimeout(connectBinance, 5000);
         return;
       }
-      wsRef.current = ws;
+      wsRefs.current.binance = ws;
 
       ws.onopen = () => {
         if (cancelled) return;
-        setStatus("live");
+        setStatusFor("binance", "live");
         setStartedAt((prev) => prev || new Date());
       };
 
       ws.onmessage = (msg) => {
         if (cancelled) return;
+        setMsgCounts((prev) => ({ ...prev, binance: prev.binance + 1 }));
         try {
           const data = JSON.parse(msg.data);
           const o = data.o;
@@ -797,22 +809,80 @@ function LiquidationPanel({ symbol, accent }) {
 
       ws.onerror = () => {
         if (cancelled) return;
-        setStatus("disconnected");
+        setStatusFor("binance", "disconnected");
       };
 
       ws.onclose = () => {
         if (cancelled) return;
-        setStatus("disconnected");
-        reconnectTimerRef.current = setTimeout(connect, 4000);
+        setStatusFor("binance", "disconnected");
+        reconnectTimers.current.binance = setTimeout(connectBinance, 4000);
       };
     };
 
-    connect();
+    // ---- Bybit ----
+    const connectBybit = () => {
+      if (cancelled) return;
+      setStatusFor("bybit", "connecting");
+      let ws;
+      try {
+        ws = new WebSocket("wss://stream.bybit.com/v5/public/linear");
+      } catch {
+        setStatusFor("bybit", "disconnected");
+        reconnectTimers.current.bybit = setTimeout(connectBybit, 5000);
+        return;
+      }
+      wsRefs.current.bybit = ws;
+
+      ws.onopen = () => {
+        if (cancelled) return;
+        ws.send(JSON.stringify({ op: "subscribe", args: [`allLiquidation.${symbol}`] }));
+        setStatusFor("bybit", "live");
+        setStartedAt((prev) => prev || new Date());
+        // Bybit은 주기적으로 ping을 보내지 않으면 연결이 끊김
+        pingTimers.current.bybit = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ op: "ping" }));
+        }, 20000);
+      };
+
+      ws.onmessage = (msg) => {
+        if (cancelled) return;
+        setMsgCounts((prev) => ({ ...prev, bybit: prev.bybit + 1 }));
+        try {
+          const data = JSON.parse(msg.data);
+          if (!data.topic || !data.topic.startsWith("allLiquidation") || !Array.isArray(data.data)) return;
+          data.data.forEach((item) => {
+            const qty = parseFloat(item.v);
+            const price = parseFloat(item.p);
+            const usd = qty * price;
+            const isLongLiquidation = item.S === "Sell"; // 강제 매도 = 롱 포지션 청산
+            recordLiquidation(isLongLiquidation, usd);
+          });
+        } catch {
+          // 파싱 실패는 무시
+        }
+      };
+
+      ws.onerror = () => {
+        if (cancelled) return;
+        setStatusFor("bybit", "disconnected");
+      };
+
+      ws.onclose = () => {
+        if (cancelled) return;
+        setStatusFor("bybit", "disconnected");
+        if (pingTimers.current.bybit) clearInterval(pingTimers.current.bybit);
+        reconnectTimers.current.bybit = setTimeout(connectBybit, 4000);
+      };
+    };
+
+    connectBinance();
+    connectBybit();
 
     return () => {
       cancelled = true;
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      if (wsRef.current) wsRef.current.close();
+      Object.values(reconnectTimers.current).forEach((t) => clearTimeout(t));
+      Object.values(pingTimers.current).forEach((t) => clearInterval(t));
+      Object.values(wsRefs.current).forEach((ws) => ws && ws.close());
     };
   }, [symbol]);
 
@@ -820,11 +890,16 @@ function LiquidationPanel({ symbol, accent }) {
   const longPct = total > 0 ? (stats.longUsd / total) * 100 : 50;
   const elapsedMin = startedAt ? Math.max(1, Math.round((Date.now() - startedAt.getTime()) / 60000)) : 0;
 
-  const statusMeta = {
-    connecting: { label: "연결 중…", color: "#8B948E" },
-    live: { label: "실시간 수신 중", color: "#6FCB9F" },
-    disconnected: { label: "연결 끊김 (재시도 중)", color: "#E2604F" },
-  }[status];
+  const anyLive = exchangeStatus.binance === "live" || exchangeStatus.bybit === "live";
+  const overallColor = anyLive ? "#6FCB9F" : exchangeStatus.binance === "connecting" || exchangeStatus.bybit === "connecting" ? "#8B948E" : "#E2604F";
+  const exchangeLabel = (label, s) => {
+    const color = s === "live" ? "#6FCB9F" : s === "connecting" ? "#8B948E" : "#E2604F";
+    return (
+      <span style={{ color, fontFamily: "IBM Plex Mono, monospace", fontSize: 10 }}>
+        {label} {s === "live" ? "●" : s === "connecting" ? "…" : "✕"}
+      </span>
+    );
+  };
 
   return (
     <section style={styles.newsCard}>
@@ -832,9 +907,10 @@ function LiquidationPanel({ symbol, accent }) {
         <div style={styles.tableTitle}>
           실시간 청산 추적 {sharedMode && <span style={styles.newsTimestamp}>(전체 기기 합산)</span>}
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ ...styles.liveDot, background: statusMeta.color }} />
-          <span style={{ ...styles.newsTimestamp, color: statusMeta.color }}>{statusMeta.label}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          {exchangeLabel("Binance", exchangeStatus.binance)}
+          {exchangeLabel("Bybit", exchangeStatus.bybit)}
+          <span style={{ ...styles.liveDot, background: overallColor }} />
         </div>
       </div>
 
@@ -847,6 +923,13 @@ function LiquidationPanel({ symbol, accent }) {
           ? `${elapsedMin}분째 이 기기에서만 추적 중 (Supabase 미연결 — ${supabaseDebugInfo})`
           : "연결 대기 중…"}
       </div>
+
+      {sharedMode && (
+        <div style={{ ...styles.posNote, marginTop: 6 }}>
+          RPC 저장: 성공 {rpcDebug.success}건 / 실패 {rpcDebug.error}건
+          {rpcDebug.lastError && ` (최근 에러: ${rpcDebug.lastError})`}
+        </div>
+      )}
 
       {total > 0 ? (
         <div style={{ marginTop: 12 }}>
@@ -872,7 +955,13 @@ function LiquidationPanel({ symbol, accent }) {
           )}
         </div>
       ) : (
-        status === "live" && <div style={{ ...styles.posNote, marginTop: 8 }}>아직 감지된 청산이 없습니다.</div>
+        anyLive && (
+          <div style={{ ...styles.posNote, marginTop: 8 }}>
+            아직 감지된 청산이 없습니다. (수신 메시지: Binance {msgCounts.binance}건 / Bybit {msgCounts.bybit}건 — 이
+            숫자가 0에서 안 늘면 연결은 됐지만 데이터가 안 들어오는 것이고, 늘어나는데 청산 건수만 0이면 진짜
+            조용한 구간인 것입니다.)
+          </div>
+        )
       )}
     </section>
   );
