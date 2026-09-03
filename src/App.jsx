@@ -216,7 +216,7 @@ export default function CryptoTrendDashboard() {
     }
     let cancelled = false;
     (async () => {
-      const { data } = await supabase.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
+      const { data } = await supabase.from("crypto_profiles").select("*").eq("id", session.user.id).maybeSingle();
       if (!cancelled) setProfile(data);
     })();
     return () => {
@@ -226,7 +226,7 @@ export default function CryptoTrendDashboard() {
 
   const tier = profile?.tier || "free";
   const tierRank = { free: 0, bronze: 1, silver: 2 };
-  const hasAccess = (requiredTier) => tierRank[tier] >= tierRank[requiredTier];
+  const hasAccess = (requiredTier) => profile?.is_admin || tierRank[tier] >= tierRank[requiredTier];
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -438,6 +438,8 @@ export default function CryptoTrendDashboard() {
       <style>{FONT_IMPORT}</style>
       <div style={styles.container}>
         <AccountBar session={session} profile={profile} authLoading={authLoading} tier={tier} />
+
+        {profile?.is_admin && <AdminPanel />}
 
         <header style={styles.header}>
           <div style={styles.tabRow}>
@@ -779,6 +781,10 @@ function AccountBar({ session, profile, authLoading, tier }) {
       <div style={styles.accountBar}>
         <span style={styles.accountText}>
           {session.user.email} · <span style={{ color: tier === "free" ? "#8B948E" : "#6FCB9F" }}>{TIER_LABEL(tier)}</span>
+          {" "}
+          <span style={{ color: "#5B9BD5" }}>
+            [디버그: is_admin={String(profile?.is_admin)}, profile존재={String(!!profile)}]
+          </span>
           {profile?.pending_tier && (
             <span style={{ color: "#5B9BD5" }}> ({TIER_LABEL(profile.pending_tier)} 승인 대기 중)</span>
           )}
@@ -935,6 +941,99 @@ function SubscribeModal({ profile, onClose }) {
         </button>
       </div>
     </div>
+  );
+}
+
+function AdminPanel() {
+  const [pending, setPending] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+
+  const fetchPending = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const { data, error } = await supabase.rpc("admin_list_pending");
+      if (error) throw error;
+      setPending(data || []);
+    } catch (e) {
+      setError(e.message || "조회에 실패했습니다");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchPending();
+  }, []);
+
+  const approve = async (userId, tier) => {
+    setBusyId(userId);
+    try {
+      const { error } = await supabase.rpc("admin_approve", { p_user_id: userId, p_tier: tier });
+      if (error) throw error;
+      await fetchPending();
+    } catch (e) {
+      setError(e.message || "승인에 실패했습니다");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <section style={{ ...styles.newsCard, borderColor: "#5B9BD5" }}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>🛠 관리자: 구독 승인 대기</div>
+        <button onClick={fetchPending} style={styles.newsBtn} disabled={loading}>
+          <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
+          새로고침
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ ...styles.errorBox, marginBottom: 0 }}>
+          <AlertTriangle size={14} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {pending && pending.length === 0 && <div style={styles.newsEmpty}>승인 대기 중인 신청이 없습니다.</div>}
+
+      {pending && pending.length > 0 && (
+        <div style={styles.pmList}>
+          {pending.map((p) => (
+            <div key={p.id} style={styles.pmRow}>
+              <div style={styles.pmQuestion}>{p.email}</div>
+              <div style={styles.pmMetaRow}>
+                <span style={{ color: "#5B9BD5", fontFamily: "IBM Plex Mono, monospace", fontSize: 12 }}>
+                  {TIER_LABEL(p.pending_tier)} 신청
+                </span>
+                <span style={styles.pmMetaSub}>
+                  {p.pending_at ? new Date(p.pending_at).toLocaleString("ko-KR") : ""}
+                </span>
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                <button
+                  onClick={() => approve(p.id, p.pending_tier)}
+                  style={{ ...styles.accountBtn, borderColor: "#6FCB9F", color: "#6FCB9F" }}
+                  disabled={busyId === p.id}
+                >
+                  승인
+                </button>
+                <button
+                  onClick={() => approve(p.id, "free")}
+                  style={styles.accountBtnGhost}
+                  disabled={busyId === p.id}
+                >
+                  거절(free 유지)
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
