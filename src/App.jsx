@@ -1567,26 +1567,30 @@ function ExchangeFlowPanel() {
           {data.addresses.map((item) => (
             <div key={item.address} style={styles.pmRow}>
               <div style={styles.pmQuestion}>{item.label}</div>
-              <div style={styles.pmMetaRow}>
-                <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 13, color: "#EDEAE3" }}>
-                  {Math.round(item.balance).toLocaleString("ko-KR")} XRP
-                </span>
-                {item.delta != null ? (
-                  <span
-                    style={{
-                      fontFamily: "IBM Plex Mono, monospace",
-                      fontSize: 12,
-                      fontWeight: 600,
-                      color: item.delta >= 0 ? "#6FCB9F" : "#E2604F",
-                    }}
-                  >
-                    {item.delta >= 0 ? "+" : ""}
-                    {Math.round(item.delta).toLocaleString("ko-KR")} (24h)
+              {item.error ? (
+                <div style={{ ...styles.pmMetaSub, color: "#E2604F" }}>조회 실패: {item.error}</div>
+              ) : (
+                <div style={styles.pmMetaRow}>
+                  <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 13, color: "#EDEAE3" }}>
+                    {Math.round(item.balance).toLocaleString("ko-KR")} XRP
                   </span>
-                ) : (
-                  <span style={styles.pmMetaSub}>24h 전 데이터 없음 (다음 조회부터 비교됨)</span>
-                )}
-              </div>
+                  {item.delta != null ? (
+                    <span
+                      style={{
+                        fontFamily: "IBM Plex Mono, monospace",
+                        fontSize: 12,
+                        fontWeight: 600,
+                        color: item.delta >= 0 ? "#6FCB9F" : "#E2604F",
+                      }}
+                    >
+                      {item.delta >= 0 ? "+" : ""}
+                      {Math.round(item.delta).toLocaleString("ko-KR")} (24h)
+                    </span>
+                  ) : (
+                    <span style={styles.pmMetaSub}>24h 전 데이터 없음 (다음 조회부터 비교됨)</span>
+                  )}
+                </div>
+              )}
             </div>
           ))}
           <div style={styles.posNote}>
