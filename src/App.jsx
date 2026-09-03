@@ -689,6 +689,7 @@ function LiquidationPanel({ symbol, accent }) {
   const [lastEvent, setLastEvent] = useState(null);
   const [msgCounts, setMsgCounts] = useState({ binance: 0, bybit: 0 });
   const [rpcDebug, setRpcDebug] = useState({ success: 0, error: 0, lastError: null });
+  const [initialFetchDebug, setInitialFetchDebug] = useState("조회 중…");
   const [sharedMode, setSharedMode] = useState(!!supabase);
   const [updatedAt, setUpdatedAt] = useState(null);
   const wsRefs = useRef({});
@@ -715,7 +716,19 @@ function LiquidationPanel({ symbol, accent }) {
     };
 
     (async () => {
-      const { data } = await supabase.from("liquidation_totals").select("*").eq("symbol", symbol).maybeSingle();
+      const { data, error } = await supabase
+        .from("liquidation_totals")
+        .select("*")
+        .eq("symbol", symbol)
+        .maybeSingle();
+      if (cancelled) return;
+      if (error) {
+        setInitialFetchDebug(`실패: ${error.message}`);
+      } else if (data) {
+        setInitialFetchDebug(`성공 (기존 값 있음: 롱 $${Number(data.long_usd).toFixed(0)} / 숏 $${Number(data.short_usd).toFixed(0)})`);
+      } else {
+        setInitialFetchDebug("성공 (아직 이 심볼의 행이 없음 — 첫 청산 전이면 정상)");
+      }
       applyRow(data);
     })();
 
@@ -942,6 +955,8 @@ function LiquidationPanel({ symbol, accent }) {
           {rpcDebug.lastError && ` (최근 에러: ${rpcDebug.lastError})`}
         </div>
       )}
+
+      <div style={{ ...styles.posNote, marginTop: 4 }}>초기 조회: {initialFetchDebug}</div>
 
       <div style={{ ...styles.posNote, marginTop: 4 }}>
         수신 메시지: Binance {msgCounts.binance}건 / Bybit {msgCounts.bybit}건
