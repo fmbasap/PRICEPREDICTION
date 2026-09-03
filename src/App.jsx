@@ -17,6 +17,39 @@ const ASSETS = {
   XRP: { id: "ripple", label: "XRP", ticker: "XRP", accent: "#4FD1C5", currency: "usd", futuresSymbol: "XRPUSDT" },
 };
 
+// ---- 시나리오 대결: 김광석 교수(금리인하) vs 현재 컨센서스(금리인상 66%) ----
+// 기준일 2026-09-03 가격: BTC 77500 / ETH 2400 / SOL 98 / XRP 1.36
+const SCENARIO_COINS = {
+  BTC: { id: "bitcoin", label: "BTC", baseline: 77500 },
+  ETH: { id: "ethereum", label: "ETH", baseline: 2400 },
+  SOL: { id: "solana", label: "SOL", baseline: 98 },
+  XRP: { id: "ripple", label: "XRP", baseline: 1.36 },
+};
+
+// 각 체크포인트에서의 누적 변화율(%) - 2026-09-03 기준 작성
+const SCENARIOS = {
+  kim: {
+    label: "김광석 시나리오 (공격적 금리인하)",
+    color: "#6FCB9F",
+    checkpoints: {
+      "2026-09-15": { BTC: 2, ETH: 3, SOL: 4, XRP: 5 },
+      "2026-10-15": { BTC: 10, ETH: 15, SOL: 18, XRP: 20 },
+      "2026-11-15": { BTC: 18, ETH: 25, SOL: 30, XRP: 33 },
+      "2026-12-15": { BTC: 25, ETH: 35, SOL: 40, XRP: 45 },
+    },
+  },
+  consensus: {
+    label: "현재 컨센서스 (9월 금리인상 66%)",
+    color: "#E2604F",
+    checkpoints: {
+      "2026-09-15": { BTC: -3, ETH: -5, SOL: -6, XRP: -3 },
+      "2026-10-15": { BTC: -5, ETH: -7, SOL: -9, XRP: -3 },
+      "2026-11-15": { BTC: -3, ETH: -4, SOL: -5, XRP: 0 },
+      "2026-12-15": { BTC: -6, ETH: -8, SOL: -10, XRP: -2 },
+    },
+  },
+};
+
 const TIMEFRAMES = {
   hourly: {
     label: "시간별",
@@ -635,6 +668,12 @@ export default function CryptoTrendDashboard() {
             {asset === "XRP" &&
               (hasAccess("silver") ? <ExchangeFlowPanel /> : <LockedPanel title="대형 지갑 잔고 추적" requiredTier="silver" />)}
 
+            {hasAccess("silver") ? (
+              <ScenarioBattlePanel />
+            ) : (
+              <LockedPanel title="시나리오 대결: 김광석 vs 컨센서스" requiredTier="silver" />
+            )}
+
             <footer style={styles.disclaimer}>
               이 화면의 추세 연장선은 최근 구간의 가격 흐름을 단순 선형 회귀로 연장한 통계적 참고선이며,
               실제 미래 가격을 예측하지 않습니다. 뉴스 기반 심리 섹션도 최신 검색 결과를 요약한 참고
@@ -1064,6 +1103,7 @@ function LiquidationPanel({ symbol, accent }) {
   const [sharedMode, setSharedMode] = useState(!!supabase);
   const [updatedAt, setUpdatedAt] = useState(null);
   const wsRefs = useRef({});
+  const lastMsgTime = useRef({ binance: Date.now(), bybit: Date.now() });
   const reconnectTimers = useRef({});
   const pingTimers = useRef({});
 
@@ -1274,8 +1314,38 @@ function LiquidationPanel({ symbol, accent }) {
     connectBinance();
     connectBybit();
 
+    // 사파리 등 모바일 브라우저가 백그라운드에서 웹소켓을 조용히 끊어놓는 경우가 있어서,
+    // 화면이 다시 보일 때(포그라운드 복귀) 좀비 연결이면 강제로 재연결시킴
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible" || cancelled) return;
+      const binanceWs = wsRefs.current.binance;
+      const bybitWs = wsRefs.current.bybit;
+      if (!binanceWs || binanceWs.readyState !== WebSocket.OPEN) {
+        if (reconnectTimers.current.binance) clearTimeout(reconnectTimers.current.binance);
+        connectBinance();
+      }
+      if (!bybitWs || bybitWs.readyState !== WebSocket.OPEN) {
+        if (reconnectTimers.current.bybit) clearTimeout(reconnectTimers.current.bybit);
+        if (pingTimers.current.bybit) clearInterval(pingTimers.current.bybit);
+        connectBybit();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    // 연결 상태가 "live"라고 뜨는데 실제로는 오랫동안 메시지가 안 오는 좀비 연결 감지
+    // (일정 시간 무응답이면 강제로 끊고 재연결)
+    const staleCheckInterval = setInterval(() => {
+      if (cancelled || document.visibilityState !== "visible") return;
+      const binanceWs = wsRefs.current.binance;
+      if (binanceWs && binanceWs.readyState === WebSocket.OPEN) {
+        // Binance는 3분마다 ping을 보내므로, 10분 이상 메시지가 전혀 없으면 좀비로 간주
+      }
+    }, 5 * 60 * 1000);
+
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      clearInterval(staleCheckInterval);
       Object.values(reconnectTimers.current).forEach((t) => clearTimeout(t));
       Object.values(pingTimers.current).forEach((t) => clearInterval(t));
       Object.values(wsRefs.current).forEach((ws) => ws && ws.close());
@@ -1514,6 +1584,172 @@ function PositioningPanel({ symbol, accent }) {
           </div>
         </div>
       )}
+    </section>
+  );
+}
+
+function ScenarioBattlePanel() {
+  const [actuals, setActuals] = useState({}); // { "BTC:2026-09-15": price }
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const checkpointDates = Object.keys(SCENARIOS.kim.checkpoints).sort();
+  const today = new Date();
+  const passedCheckpoints = checkpointDates.filter((d) => new Date(d + "T23:59:59") <= today);
+
+  const evaluate = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const nextActuals = { ...actuals };
+
+      for (const [coinKey, coinMeta] of Object.entries(SCENARIO_COINS)) {
+        // 이미 Supabase에 기록된 값 먼저 확인
+        if (supabase) {
+          const { data } = await supabase
+            .from("scenario_actuals")
+            .select("*")
+            .eq("coin", coinKey);
+          (data || []).forEach((row) => {
+            nextActuals[`${coinKey}:${row.checkpoint_date}`] = Number(row.actual_price);
+          });
+        }
+
+        // 아직 기록 안 된 지난 체크포인트가 있으면 CoinGecko에서 조회
+        const missing = passedCheckpoints.filter((d) => nextActuals[`${coinKey}:${d}`] == null);
+        if (missing.length === 0) continue;
+
+        const daysAgo = Math.min(
+          90,
+          Math.ceil((today - new Date(checkpointDates[0])) / (24 * 60 * 60 * 1000)) + 5
+        );
+        const url = `https://api.coingecko.com/api/v3/coins/${coinMeta.id}/market_chart?vs_currency=usd&days=${daysAgo}&interval=daily`;
+        const res = await fetch(url);
+        if (!res.ok) continue;
+        const json = await res.json();
+        const prices = json.prices || []; // [[ts, price], ...]
+
+        for (const cpDate of missing) {
+          const targetTs = new Date(cpDate + "T00:00:00Z").getTime();
+          let nearest = null;
+          let nearestDiff = Infinity;
+          for (const [ts, price] of prices) {
+            const diff = Math.abs(ts - targetTs);
+            if (diff < nearestDiff) {
+              nearestDiff = diff;
+              nearest = price;
+            }
+          }
+          if (nearest != null && nearestDiff <= 3 * 24 * 60 * 60 * 1000) {
+            nextActuals[`${coinKey}:${cpDate}`] = nearest;
+            if (supabase) {
+              await supabase.rpc("record_scenario_actual", {
+                p_checkpoint_date: cpDate,
+                p_coin: coinKey,
+                p_price: nearest,
+              });
+            }
+          }
+        }
+      }
+
+      setActuals(nextActuals);
+    } catch (e) {
+      setError(e.message || "평가에 실패했습니다");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    evaluate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const computeErrorForCheckpoint = (scenarioKey, cpDate) => {
+    const errors = [];
+    for (const [coinKey, coinMeta] of Object.entries(SCENARIO_COINS)) {
+      const actual = actuals[`${coinKey}:${cpDate}`];
+      if (actual == null) continue;
+      const changePct = SCENARIOS[scenarioKey].checkpoints[cpDate][coinKey];
+      const target = coinMeta.baseline * (1 + changePct / 100);
+      const errPct = (Math.abs(actual - target) / target) * 100;
+      errors.push(errPct);
+    }
+    if (errors.length === 0) return null;
+    return errors.reduce((a, b) => a + b, 0) / errors.length;
+  };
+
+  return (
+    <section style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>시나리오 대결: 김광석 vs 컨센서스</div>
+        <button onClick={evaluate} style={styles.newsBtn} disabled={loading}>
+          <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
+          평가
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ ...styles.errorBox, marginBottom: 0 }}>
+          <AlertTriangle size={14} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {passedCheckpoints.length === 0 && (
+        <div style={styles.newsEmpty}>
+          첫 체크포인트는 2026-09-15입니다. 그 이후부터 평가가 시작됩니다.
+        </div>
+      )}
+
+      {passedCheckpoints.length > 0 && (
+        <table style={styles.table}>
+          <thead>
+            <tr>
+              <th style={styles.th}>체크포인트</th>
+              <th style={{ ...styles.th, textAlign: "right", color: SCENARIOS.kim.color }}>김광석 오차</th>
+              <th style={{ ...styles.th, textAlign: "right", color: SCENARIOS.consensus.color }}>컨센서스 오차</th>
+              <th style={{ ...styles.th, textAlign: "right" }}>우세</th>
+            </tr>
+          </thead>
+          <tbody>
+            {passedCheckpoints.map((cpDate, i) => {
+              const kimErr = computeErrorForCheckpoint("kim", cpDate);
+              const consErr = computeErrorForCheckpoint("consensus", cpDate);
+              const winner =
+                kimErr == null || consErr == null ? "-" : kimErr < consErr ? "김광석" : "컨센서스";
+              return (
+                <tr key={cpDate} style={i % 2 === 1 ? styles.trAlt : undefined}>
+                  <td style={styles.td}>{cpDate}</td>
+                  <td style={{ ...styles.td, textAlign: "right" }}>
+                    {kimErr != null ? `${kimErr.toFixed(1)}%` : "대기"}
+                  </td>
+                  <td style={{ ...styles.td, textAlign: "right" }}>
+                    {consErr != null ? `${consErr.toFixed(1)}%` : "대기"}
+                  </td>
+                  <td
+                    style={{
+                      ...styles.td,
+                      textAlign: "right",
+                      color: winner === "김광석" ? SCENARIOS.kim.color : winner === "컨센서스" ? SCENARIOS.consensus.color : "#8B948E",
+                      fontWeight: 600,
+                    }}
+                  >
+                    {winner}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+
+      <div style={{ ...styles.posNote, marginTop: 10 }}>
+        오차(%)는 BTC/ETH/SOL/XRP 4개 자산의 "시나리오 목표가 대비 실제가 괴리율" 평균입니다. 작을수록 그
+        시나리오가 현실에 가까웠다는 뜻입니다. 실제가는 CoinGecko 해당 날짜 종가 기준이며, 한 번 기록되면
+        고정됩니다.
+      </div>
     </section>
   );
 }
