@@ -189,6 +189,45 @@ export default function CryptoTrendDashboard() {
   const [error, setError] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
 
+  // ---- 로그인/등급 상태 ----
+  const [session, setSession] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  useEffect(() => {
+    if (!supabase) {
+      setAuthLoading(false);
+      return;
+    }
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setAuthLoading(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!supabase || !session) {
+      setProfile(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
+      if (!cancelled) setProfile(data);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [session]);
+
+  const tier = profile?.tier || "free";
+  const tierRank = { free: 0, bronze: 1, silver: 2 };
+  const hasAccess = (requiredTier) => tierRank[tier] >= tierRank[requiredTier];
+
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const fetchAssetOnce = useCallback(async (key, tf) => {
@@ -398,6 +437,8 @@ export default function CryptoTrendDashboard() {
     <div style={styles.page}>
       <style>{FONT_IMPORT}</style>
       <div style={styles.container}>
+        <AccountBar session={session} profile={profile} authLoading={authLoading} tier={tier} />
+
         <header style={styles.header}>
           <div style={styles.tabRow}>
             {Object.entries(ASSETS).map(([key, m]) => (
@@ -573,11 +614,24 @@ export default function CryptoTrendDashboard() {
 
             <PositioningPanel key={`pos-${asset}`} symbol={meta.futuresSymbol} accent={meta.accent} />
 
-            <LiquidationPanel key={`liq-${asset}`} symbol={meta.futuresSymbol} accent={meta.accent} />
+            {hasAccess("silver") ? (
+              <LiquidationPanel key={`liq-${asset}`} symbol={meta.futuresSymbol} accent={meta.accent} />
+            ) : (
+              <LockedPanel title="실시간 청산 추적" requiredTier="silver" />
+            )}
 
-            {(asset === "XRP" || asset === "FLR") && <NewsPanel key={asset} assetKey={asset} />}
+            {(asset === "XRP" || asset === "FLR") &&
+              (hasAccess("bronze") ? (
+                <NewsPanel key={asset} assetKey={asset} />
+              ) : (
+                <LockedPanel title="뉴스 기반 심리" requiredTier="bronze" />
+              ))}
 
-            {asset === "XRP" && <PredictionMarketPanel />}
+            {asset === "XRP" &&
+              (hasAccess("bronze") ? <PredictionMarketPanel /> : <LockedPanel title="예측시장 전망 (Polymarket)" requiredTier="bronze" />)}
+
+            {asset === "XRP" &&
+              (hasAccess("silver") ? <ExchangeFlowPanel /> : <LockedPanel title="대형 지갑 잔고 추적" requiredTier="silver" />)}
 
             <footer style={styles.disclaimer}>
               이 화면의 추세 연장선은 최근 구간의 가격 흐름을 단순 선형 회귀로 연장한 통계적 참고선이며,
@@ -677,6 +731,224 @@ function PredictionAccuracyCard({ log, timeframe }) {
         새 예측은 최소 {timeframe === "hourly" ? "10분" : "1일"} 간격으로만 저장됩니다 (새로고침을 여러 번 해도
         중복 저장되지 않습니다). 이 기기(브라우저)에만 저장되며, 다른 기기나 시크릿 모드에서는 기록이 보이지
         않아요.
+      </div>
+    </section>
+  );
+}
+
+function TIER_LABEL(tier) {
+  return { free: "무료", bronze: "브론즈", silver: "실버" }[tier] || "무료";
+}
+
+function AccountBar({ session, profile, authLoading, tier }) {
+  const [showAuth, setShowAuth] = useState(false);
+  const [showSubscribe, setShowSubscribe] = useState(false);
+
+  if (!supabase) {
+    return (
+      <div style={styles.accountBar}>
+        <span style={styles.accountText}>로그인 기능 준비 중</span>
+      </div>
+    );
+  }
+
+  if (authLoading) {
+    return (
+      <div style={styles.accountBar}>
+        <span style={styles.accountText}>확인 중…</span>
+      </div>
+    );
+  }
+
+  if (!session) {
+    return (
+      <>
+        <div style={styles.accountBar}>
+          <span style={styles.accountText}>로그인하면 브론즈/실버 기능을 이용하실 수 있어요</span>
+          <button onClick={() => setShowAuth(true)} style={styles.accountBtn}>
+            로그인 / 회원가입
+          </button>
+        </div>
+        {showAuth && <AuthModal onClose={() => setShowAuth(false)} />}
+      </>
+    );
+  }
+
+  return (
+    <>
+      <div style={styles.accountBar}>
+        <span style={styles.accountText}>
+          {session.user.email} · <span style={{ color: tier === "free" ? "#8B948E" : "#6FCB9F" }}>{TIER_LABEL(tier)}</span>
+          {profile?.pending_tier && (
+            <span style={{ color: "#5B9BD5" }}> ({TIER_LABEL(profile.pending_tier)} 승인 대기 중)</span>
+          )}
+        </span>
+        <div style={{ display: "flex", gap: 6 }}>
+          {tier !== "silver" && (
+            <button onClick={() => setShowSubscribe(true)} style={styles.accountBtn}>
+              구독하기
+            </button>
+          )}
+          <button onClick={() => supabase.auth.signOut()} style={styles.accountBtnGhost}>
+            로그아웃
+          </button>
+        </div>
+      </div>
+      {showSubscribe && <SubscribeModal profile={profile} onClose={() => setShowSubscribe(false)} />}
+    </>
+  );
+}
+
+function AuthModal({ onClose }) {
+  const [mode, setMode] = useState("login"); // login | signup
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [signupDone, setSignupDone] = useState(false);
+
+  const submit = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      if (mode === "signup") {
+        const { error } = await supabase.auth.signUp({ email, password });
+        if (error) throw error;
+        setSignupDone(true);
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        onClose();
+      }
+    } catch (e) {
+      setError(e.message || "오류가 발생했습니다");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalTitle}>{mode === "login" ? "로그인" : "회원가입"}</div>
+
+        {signupDone ? (
+          <div style={styles.newsEmpty}>가입 확인 이메일을 보내드렸습니다. 메일함을 확인해서 인증을 완료해주세요.</div>
+        ) : (
+          <>
+            <input
+              type="email"
+              placeholder="이메일"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              style={styles.modalInput}
+            />
+            <input
+              type="password"
+              placeholder="비밀번호 (6자 이상)"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              style={styles.modalInput}
+            />
+            {error && (
+              <div style={{ ...styles.errorBox, marginBottom: 0 }}>
+                <AlertTriangle size={14} />
+                <span>{error}</span>
+              </div>
+            )}
+            <button onClick={submit} style={styles.modalPrimaryBtn} disabled={loading || !email || !password}>
+              {loading ? "처리 중…" : mode === "login" ? "로그인" : "회원가입"}
+            </button>
+            <button
+              onClick={() => setMode(mode === "login" ? "signup" : "login")}
+              style={styles.modalSwitchBtn}
+            >
+              {mode === "login" ? "계정이 없으신가요? 회원가입" : "이미 계정이 있으신가요? 로그인"}
+            </button>
+          </>
+        )}
+
+        <button onClick={onClose} style={styles.modalCloseBtn}>
+          닫기
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function SubscribeModal({ profile, onClose }) {
+  const [requesting, setRequesting] = useState(false);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState(null);
+
+  const request = async (tierName) => {
+    setRequesting(true);
+    setError(null);
+    try {
+      const { error } = await supabase.rpc("request_subscription", { p_tier: tierName });
+      if (error) throw error;
+      setDone(true);
+    } catch (e) {
+      setError(e.message || "신청에 실패했습니다");
+    } finally {
+      setRequesting(false);
+    }
+  };
+
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalTitle}>구독하기</div>
+
+        {done ? (
+          <div style={styles.newsEmpty}>
+            신청이 접수됐습니다. 아래 계좌로 입금해주시면 확인 후 등급이 반영됩니다 (영업일 기준 1일 이내).
+            <div style={{ ...styles.posNote, marginTop: 10 }}>입금 계좌: [여기에 실제 계좌번호를 넣어주세요]</div>
+          </div>
+        ) : (
+          <>
+            <div style={styles.tierCard}>
+              <div style={styles.tierName}>브론즈 · 월 15,000원</div>
+              <div style={styles.tierDesc}>뉴스 기반 심리 + 예측시장 전망(Polymarket)</div>
+              <button onClick={() => request("bronze")} style={styles.modalPrimaryBtn} disabled={requesting}>
+                브론즈 신청
+              </button>
+            </div>
+            <div style={styles.tierCard}>
+              <div style={styles.tierName}>실버 · 월 30,000원</div>
+              <div style={styles.tierDesc}>브론즈 전체 + 실시간 청산 추적 + 대형 지갑 잔고 추적</div>
+              <button onClick={() => request("silver")} style={styles.modalPrimaryBtn} disabled={requesting}>
+                실버 신청
+              </button>
+            </div>
+            {error && (
+              <div style={{ ...styles.errorBox, marginBottom: 0 }}>
+                <AlertTriangle size={14} />
+                <span>{error}</span>
+              </div>
+            )}
+          </>
+        )}
+
+        <button onClick={onClose} style={styles.modalCloseBtn}>
+          닫기
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function LockedPanel({ title, requiredTier }) {
+  return (
+    <section style={{ ...styles.newsCard, position: "relative" }}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>{title}</div>
+      </div>
+      <div style={styles.lockedBody}>
+        <div style={{ fontSize: 20 }}>🔒</div>
+        <div style={styles.newsEmpty}>
+          {TIER_LABEL(requiredTier)} 등급부터 이용 가능합니다. 상단의 "구독하기"에서 신청해주세요.
+        </div>
       </div>
     </section>
   );
@@ -1147,6 +1419,87 @@ function PositioningPanel({ symbol, accent }) {
   );
 }
 
+function ExchangeFlowPanel() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const fetchFlow = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/exchange-flow");
+      const json = await res.json();
+      if (!res.ok || json.error) throw new Error(json.error || `조회에 실패했습니다 (${res.status})`);
+      setData(json);
+    } catch (e) {
+      setError(e.message || "잔고 데이터를 불러오지 못했습니다");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <section style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>대형 지갑 잔고 추적</div>
+        <button onClick={fetchFlow} style={styles.newsBtn} disabled={loading}>
+          <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
+          {loading ? "조회 중…" : data ? "다시 조회" : "불러오기"}
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ ...styles.errorBox, marginBottom: 0 }}>
+          <AlertTriangle size={14} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {!data && !loading && !error && (
+        <div style={styles.newsEmpty}>
+          검증된 대형 지갑(현재 Ripple 에스크로, Coinbase 1개 주소)의 잔고 변화를 24시간 전과 비교합니다.
+          XRPL은 완전히 공개된 원장이라 가능한 조회입니다. 아직 주소 수가 적어 참고용으로만 봐주세요.
+        </div>
+      )}
+
+      {data && (
+        <div style={styles.pmList}>
+          {data.addresses.map((item) => (
+            <div key={item.address} style={styles.pmRow}>
+              <div style={styles.pmQuestion}>{item.label}</div>
+              <div style={styles.pmMetaRow}>
+                <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 13, color: "#EDEAE3" }}>
+                  {Math.round(item.balance).toLocaleString("ko-KR")} XRP
+                </span>
+                {item.delta != null ? (
+                  <span
+                    style={{
+                      fontFamily: "IBM Plex Mono, monospace",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      color: item.delta >= 0 ? "#6FCB9F" : "#E2604F",
+                    }}
+                  >
+                    {item.delta >= 0 ? "+" : ""}
+                    {Math.round(item.delta).toLocaleString("ko-KR")} (24h)
+                  </span>
+                ) : (
+                  <span style={styles.pmMetaSub}>24h 전 데이터 없음 (다음 조회부터 비교됨)</span>
+                )}
+              </div>
+            </div>
+          ))}
+          <div style={styles.posNote}>
+            잔고 증가는 해당 주소로 순유입(예: Coinbase면 매도 대기 물량 증가 가능성), 감소는 순유출(콜드월렛 이동 등
+            장기보유 신호 가능성)로 해석하는 경우가 많지만, 운영상 이동일 수도 있어 확정적 신호는 아닙니다.
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function PredictionMarketPanel() {
   const [markets, setMarkets] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -1604,6 +1957,142 @@ const styles = {
   pmBarFill: {
     height: "100%",
     background: "#5B9BD5",
+  },
+  accountBar: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+    padding: "8px 4px",
+    flexWrap: "wrap",
+    gap: 6,
+  },
+  accountText: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 11,
+    color: "#8B948E",
+  },
+  accountBtn: {
+    background: "transparent",
+    border: "1px solid #5B9BD5",
+    color: "#5B9BD5",
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 11,
+    padding: "5px 10px",
+    borderRadius: 6,
+    cursor: "pointer",
+  },
+  accountBtnGhost: {
+    background: "transparent",
+    border: "1px solid #232B27",
+    color: "#5B6660",
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 11,
+    padding: "5px 10px",
+    borderRadius: 6,
+    cursor: "pointer",
+  },
+  modalOverlay: {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    background: "rgba(0,0,0,0.6)",
+    display: "flex",
+    alignItems: "flex-end",
+    justifyContent: "center",
+    zIndex: 100,
+  },
+  modalCard: {
+    background: "#171D1A",
+    border: "1px solid #232B27",
+    borderRadius: "16px 16px 0 0",
+    padding: 20,
+    width: "100%",
+    maxWidth: 480,
+    maxHeight: "80vh",
+    overflowY: "auto",
+  },
+  modalTitle: {
+    fontFamily: "Space Grotesk, sans-serif",
+    fontSize: 18,
+    fontWeight: 600,
+    color: "#EDEAE3",
+    marginBottom: 14,
+  },
+  modalInput: {
+    width: "100%",
+    background: "#0E1210",
+    border: "1px solid #232B27",
+    borderRadius: 8,
+    padding: "10px 12px",
+    color: "#EDEAE3",
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 13,
+    marginBottom: 10,
+  },
+  modalPrimaryBtn: {
+    width: "100%",
+    background: "#5B9BD5",
+    border: "none",
+    borderRadius: 8,
+    padding: "11px 0",
+    color: "#0E1210",
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer",
+    marginBottom: 8,
+  },
+  modalSwitchBtn: {
+    width: "100%",
+    background: "transparent",
+    border: "none",
+    color: "#8B948E",
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 11,
+    padding: "6px 0",
+    cursor: "pointer",
+  },
+  modalCloseBtn: {
+    width: "100%",
+    background: "transparent",
+    border: "1px solid #232B27",
+    borderRadius: 8,
+    padding: "10px 0",
+    color: "#5B6660",
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 12,
+    cursor: "pointer",
+    marginTop: 8,
+  },
+  tierCard: {
+    border: "1px solid #232B27",
+    borderRadius: 10,
+    padding: 14,
+    marginBottom: 12,
+  },
+  tierName: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 14,
+    fontWeight: 600,
+    color: "#EDEAE3",
+    marginBottom: 6,
+  },
+  tierDesc: {
+    fontSize: 12,
+    color: "#8B948E",
+    marginBottom: 10,
+    lineHeight: 1.5,
+  },
+  lockedBody: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    textAlign: "center",
+    gap: 8,
+    padding: "16px 0",
   },
   newsCard: {
     background: "#171D1A",
