@@ -745,7 +745,8 @@ function LiquidationPanel({ symbol, accent }) {
       setLastEvent({ isLongLiquidation, usd, time: new Date() });
       if (supabase) {
         // 공유 DB에 안전하게 더하기만 함 (다른 기기 값을 덮어쓰지 않음)
-        const { error } = await supabase.rpc("increment_liquidation", {
+        // 함수가 저장 직후 최신 누적값을 바로 돌려주므로, 실시간 구독 없이도 즉시 반영됨
+        const { data, error } = await supabase.rpc("increment_liquidation", {
           p_symbol: symbol,
           p_is_long: isLongLiquidation,
           p_usd: usd,
@@ -760,6 +761,15 @@ function LiquidationPanel({ symbol, accent }) {
           );
         } else {
           setRpcDebug((prev) => ({ ...prev, success: prev.success + 1 }));
+          if (data) {
+            setStats({
+              longUsd: Number(data.long_usd) || 0,
+              longCount: Number(data.long_count) || 0,
+              shortUsd: Number(data.short_usd) || 0,
+              shortCount: Number(data.short_count) || 0,
+            });
+            setUpdatedAt(data.updated_at ? new Date(data.updated_at) : new Date());
+          }
         }
       } else {
         setStats((prev) =>
