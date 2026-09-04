@@ -268,8 +268,9 @@ function resolvePredLog(log, rawPrices, toleranceMs) {
   if (!rawPrices || rawPrices.length === 0) return { log, changed: false };
   let changed = false;
   const now = Date.now();
-  const nextLog = log.map((batch) => {
-    const targets = batch.targets.map((t) => {
+
+  const resolveArr = (arr) =>
+    (arr || []).map((t) => {
       if (t.resolved || t.ts > now) return t;
       let nearestPrice = null;
       let nearestDiff = Infinity;
@@ -286,8 +287,12 @@ function resolvePredLog(log, rawPrices, toleranceMs) {
       }
       return t;
     });
-    return { ...batch, targets };
-  });
+
+  const nextLog = log.map((batch) => ({
+    ...batch,
+    targets: resolveArr(batch.targets),
+    holtTargets: resolveArr(batch.holtTargets), // 예전 기록(홀트 도입 전)은 undefined -> 빈 배열로 처리됨
+  }));
   return { log: nextLog, changed };
 }
 
@@ -578,18 +583,26 @@ export default function CryptoTrendDashboard() {
       const MIN_SAVE_INTERVAL_MS = timeframe === "hourly" ? 10 * 60 * 1000 : 24 * 60 * 60 * 1000;
       const canAppend = !lastBatch || Date.now() - lastBatch.createdAt >= MIN_SAVE_INTERVAL_MS;
 
-      // 신뢰도 필터: 추세연장선이 가리키는 최종 변화율이 너무 작으면(방향이 애매하면)
-      // 틀릴 확률이 높으므로 아예 예측을 저장하지 않고 건너뜀. 시간별은 예측 구간이
-      // 짧아 원래 변동폭이 작아서 기준을 낮게, 일별은 기준을 조금 높게 잡음.
+      // 신뢰도 필터: 각 방법이 가리키는 최종 변화율이 너무 작으면(방향이 애매하면)
+      // 틀릴 확률이 높으므로, 그 방법의 예측만 건너뜀 (선형회귀·홀트 각각 독립적으로 판단).
+      // 시간별은 예측 구간이 짧아 원래 변동폭이 작아서 기준을 낮게, 일별은 기준을 조금 높게 잡음.
       const MIN_SIGNAL_PCT = timeframe === "hourly" ? 0.3 : 1.0;
-      const signalStrong = Math.abs(analysis.projectedChangePct) >= MIN_SIGNAL_PCT;
+      const linearSignalStrong = Math.abs(analysis.projectedChangePct) >= MIN_SIGNAL_PCT;
+      const holtSignalStrong = Math.abs(analysis.holtProjectedChangePct) >= MIN_SIGNAL_PCT;
 
-      if (canAppend && signalStrong) {
-        const targets = analysis.chartData
-          .filter((d) => d.projection != null && d.price == null)
-          .map((d) => ({ ts: d.ts, predicted: d.projection, actual: null, resolved: false }));
-        if (targets.length > 0) {
-          log = [...log, { createdAt: Date.now(), basePrice: analysis.currentPrice, targets }];
+      if (canAppend && (linearSignalStrong || holtSignalStrong)) {
+        const targets = linearSignalStrong
+          ? analysis.chartData
+              .filter((d) => d.projection != null && d.price == null)
+              .map((d) => ({ ts: d.ts, predicted: d.projection, actual: null, resolved: false }))
+          : [];
+        const holtTargets = holtSignalStrong
+          ? analysis.chartData
+              .filter((d) => d.holtProjection != null && d.price == null)
+              .map((d) => ({ ts: d.ts, predicted: d.holtProjection, actual: null, resolved: false }))
+          : [];
+        if (targets.length > 0 || holtTargets.length > 0) {
+          log = [...log, { createdAt: Date.now(), basePrice: analysis.currentPrice, targets, holtTargets }];
           appendChanged = true;
         }
       }
@@ -881,24 +894,23 @@ function getHorizonWeight(hours) {
   return Math.min(point, 30);
 }
 
-function PredictionAccuracyCard({ log, timeframe }) {
+// 하나의 target 배열(선형 또는 홀트)에 대해 MAPE/편향/자기강화 점수를 계산
+function scoreMethod(log, key) {
   const resolved = log.flatMap((batch) =>
-    batch.targets
+    (batch[key] || [])
       .filter((t) => t.resolved)
       .map((t) => ({ ...t, createdAt: batch.createdAt, basePrice: batch.basePrice }))
   );
-  const pendingCount = log.reduce((sum, b) => sum + b.targets.filter((t) => !t.resolved).length, 0);
+  const pendingCount = log.reduce((sum, b) => sum + (b[key] || []).filter((t) => !t.resolved).length, 0);
 
   const errors = resolved.map((t) => ((t.actual - t.predicted) / t.predicted) * 100);
   const mape = errors.length ? errors.reduce((a, b) => a + Math.abs(b), 0) / errors.length : null;
   const bias = errors.length ? errors.reduce((a, b) => a + b, 0) / errors.length : null;
 
-  // ---- 자기강화 점수: 방향 적중 여부 × 시간대 가중치 ----
   const scored = resolved.map((t) => {
     const horizonHours = Math.max(0.01, (t.ts - t.createdAt) / (60 * 60 * 1000));
     const predictedDir = t.predicted - t.basePrice;
     const actualDir = t.actual - t.basePrice;
-    // 둘 다 거의 안 움직인(횡보) 경우는 판정에서 제외
     const isFlat = Math.abs(predictedDir) < 1e-9 || Math.abs(actualDir) < 1e-9;
     const isHit = !isFlat && Math.sign(predictedDir) === Math.sign(actualDir);
     const weight = getHorizonWeight(horizonHours);
@@ -911,112 +923,99 @@ function PredictionAccuracyCard({ log, timeframe }) {
   const missCount = judged.length - hitCount;
   const hitRate = judged.length ? (hitCount / judged.length) * 100 : null;
 
+  return { resolved, pendingCount, mape, bias, scored, judged, totalScore, hitCount, missCount, hitRate };
+}
+
+function MethodScoreBlock({ title, color, m, timeframe }) {
+  return (
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ ...styles.posLabel, color, fontSize: 12, marginBottom: 6 }}>{title}</div>
+      {m.judged.length === 0 ? (
+        <div style={styles.newsEmpty}>아직 검증된 예측이 없습니다.</div>
+      ) : (
+        <>
+          <div style={{ ...styles.posValue, color: m.totalScore >= 0 ? "#6FCB9F" : "#E2604F", fontSize: 20 }}>
+            {m.totalScore >= 0 ? "+" : ""}
+            {m.totalScore}점
+          </div>
+          <div style={styles.posSub}>
+            적중 {m.hitCount} / 미적중 {m.missCount} (적중률 {m.hitRate.toFixed(0)}%)
+          </div>
+          <div style={{ ...styles.posSub, marginTop: 4 }}>
+            MAPE {m.mape.toFixed(2)}% · 편향 {m.bias >= 0 ? "+" : ""}
+            {m.bias.toFixed(2)}%
+          </div>
+        </>
+      )}
+      {m.pendingCount > 0 && (
+        <div style={{ ...styles.posSub, marginTop: 4 }}>검증 대기 {m.pendingCount}건</div>
+      )}
+    </div>
+  );
+}
+
+function PredictionAccuracyCard({ log, timeframe }) {
+  const linear = scoreMethod(log, "targets");
+  const holt = scoreMethod(log, "holtTargets");
+  const recentAll = [...linear.scored.map((s) => ({ ...s, method: "선형" })), ...holt.scored.map((s) => ({ ...s, method: "홀트" }))]
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, 8);
+
   return (
     <section style={styles.newsCard}>
       <div style={styles.newsHeader}>
-        <div style={styles.tableTitle}>예측 정확도 기록</div>
-        {pendingCount > 0 && <div style={styles.newsTimestamp}>검증 대기 {pendingCount}건</div>}
+        <div style={styles.tableTitle}>예측 정확도 기록 (선형회귀 vs 홀트, 각각 채점)</div>
       </div>
 
-      {judged.length > 0 && (
-        <div style={{ ...styles.posGrid, marginBottom: 14 }}>
-          <div>
-            <div style={styles.posLabel}>자기강화 점수 (시간대 가중)</div>
-            <div style={{ ...styles.posValue, color: totalScore >= 0 ? "#6FCB9F" : "#E2604F" }}>
-              {totalScore >= 0 ? "+" : ""}
-              {totalScore}점
-            </div>
-            <div style={styles.posSub}>
-              적중 {hitCount}건(가중치만큼 가산) / 미적중 {missCount}건(-7점씩)
-            </div>
-          </div>
-          <div>
-            <div style={styles.posLabel}>방향 적중률</div>
-            <div style={styles.posValue}>{hitRate != null ? `${hitRate.toFixed(1)}%` : "-"}</div>
-            <div style={styles.posSub}>
-              1h:1점 · 2h:2점 · 3h:3점, 이후 2배가 될 때마다 +1점 (최대 30점) · 오답 -7점
-            </div>
-          </div>
-        </div>
-      )}
+      <div style={{ display: "flex", gap: 16, marginBottom: 14 }}>
+        <MethodScoreBlock title="선형회귀 추세연장" color="#EDEAE3" m={linear} timeframe={timeframe} />
+        <MethodScoreBlock title="홀트 이중지수평활" color="#F4A6C6" m={holt} timeframe={timeframe} />
+      </div>
 
-      {resolved.length === 0 ? (
+      {recentAll.length === 0 ? (
         <div style={styles.newsEmpty}>
-          아직 검증된 예측이 없습니다. 추세 연장선이 가리켰던 미래 시점이 실제로 지나야 비교할 수 있어요. 이 화면을
+          아직 검증된 예측이 없습니다. 추세선이 가리켰던 미래 시점이 실제로 지나야 비교할 수 있어요. 이 화면을
           다시 열 때마다 자동으로 쌓입니다.
         </div>
       ) : (
-        <>
-          <div style={styles.posGrid}>
-            <div>
-              <div style={styles.posLabel}>평균 절대오차 (MAPE)</div>
-              <div style={styles.posValue}>{mape.toFixed(2)}%</div>
-              <div style={styles.posSub}>{resolved.length}건 검증됨</div>
-            </div>
-            <div>
-              <div style={styles.posLabel}>평균 편향</div>
-              <div style={{ ...styles.posValue, color: bias >= 0 ? "#6FCB9F" : "#E2604F" }}>
-                {bias >= 0 ? "+" : ""}
-                {bias.toFixed(2)}%
-              </div>
-              <div style={styles.posSub}>{bias >= 0 ? "추세선이 실제보다 낮게 잡는 경향" : "추세선이 실제보다 높게 잡는 경향"}</div>
-            </div>
-          </div>
-
-          <table style={{ ...styles.table, marginTop: 14 }}>
-            <thead>
-              <tr>
-                <th style={styles.th}>목표시점</th>
-                <th style={{ ...styles.th, textAlign: "right" }}>예측가</th>
-                <th style={{ ...styles.th, textAlign: "right" }}>실제가</th>
-                <th style={{ ...styles.th, textAlign: "right" }}>오차</th>
-                <th style={{ ...styles.th, textAlign: "right" }}>점수</th>
+        <table style={{ ...styles.table, marginTop: 4 }}>
+          <thead>
+            <tr>
+              <th style={styles.th}>방법</th>
+              <th style={styles.th}>목표시점</th>
+              <th style={{ ...styles.th, textAlign: "right" }}>예측가</th>
+              <th style={{ ...styles.th, textAlign: "right" }}>실제가</th>
+              <th style={{ ...styles.th, textAlign: "right" }}>점수</th>
+            </tr>
+          </thead>
+          <tbody>
+            {recentAll.map((t, i) => (
+              <tr key={i} style={i % 2 === 1 ? styles.trAlt : undefined}>
+                <td style={{ ...styles.td, color: t.method === "홀트" ? "#F4A6C6" : "#EDEAE3" }}>{t.method}</td>
+                <td style={styles.td}>{fmtLabel(t.ts, timeframe)}</td>
+                <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(t.predicted)}</td>
+                <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(t.actual)}</td>
+                <td
+                  style={{
+                    ...styles.td,
+                    textAlign: "right",
+                    color: t.isFlat ? "#5B6660" : t.isHit ? "#6FCB9F" : "#E2604F",
+                    fontWeight: 600,
+                  }}
+                >
+                  {t.isFlat ? "-" : `${t.points >= 0 ? "+" : ""}${t.points}`}
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              {[...scored]
-                .sort((a, b) => b.ts - a.ts)
-                .slice(0, 8)
-                .map((t, i) => {
-                  const err = ((t.actual - t.predicted) / t.predicted) * 100;
-                  return (
-                    <tr key={i} style={i % 2 === 1 ? styles.trAlt : undefined}>
-                      <td style={styles.td}>{fmtLabel(t.ts, timeframe)}</td>
-                      <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(t.predicted)}</td>
-                      <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(t.actual)}</td>
-                      <td
-                        style={{
-                          ...styles.td,
-                          textAlign: "right",
-                          color: err >= 0 ? "#6FCB9F" : "#E2604F",
-                        }}
-                      >
-                        {err >= 0 ? "+" : ""}
-                        {err.toFixed(2)}%
-                      </td>
-                      <td
-                        style={{
-                          ...styles.td,
-                          textAlign: "right",
-                          color: t.isFlat ? "#5B6660" : t.isHit ? "#6FCB9F" : "#E2604F",
-                          fontWeight: 600,
-                        }}
-                      >
-                        {t.isFlat ? "-" : `${t.points >= 0 ? "+" : ""}${t.points}`}
-                      </td>
-                    </tr>
-                  );
-                })}
-            </tbody>
-          </table>
-        </>
+            ))}
+          </tbody>
+        </table>
       )}
 
       <div style={{ ...styles.posNote, marginTop: 10 }}>
-        새 예측은 최소 {timeframe === "hourly" ? "10분" : "1일"} 간격으로만 저장됩니다 (새로고침을 여러 번 해도
-        중복 저장되지 않습니다). 추세연장선의 예상 변화율이 {timeframe === "hourly" ? "0.3%" : "1.0%"} 미만으로
-        방향이 애매할 땐 예측을 아예 저장하지 않고 건너뜁니다 (신뢰도 낮은 예측을 걸러내기 위함). 이 기기(브라우저)에만
-        저장되며, 다른 기기나 시크릿 모드에서는 기록이 보이지 않아요.
+        새 예측은 최소 {timeframe === "hourly" ? "10분" : "1일"} 간격으로만 저장됩니다. 각 방법은 자기 예상
+        변화율이 {timeframe === "hourly" ? "0.3%" : "1.0%"} 미만으로 방향이 애매하면 그 방법만 독립적으로
+        건너뜁니다 (선형회귀는 저장되고 홀트는 안 될 수도, 반대도 가능). 점수 규칙은 1h:1점 · 2h:2점 · 3h:3점,
+        이후 2배가 될 때마다 +1점(최대 30점) · 오답 -7점입니다. 이 기기(브라우저)에만 저장됩니다.
       </div>
     </section>
   );
