@@ -310,7 +310,7 @@ export default function CryptoTrendDashboard() {
   }, [session]);
 
   const tier = profile?.tier || "free";
-  const tierRank = { free: 0, bronze: 1, silver: 2 };
+  const tierRank = { free: 0, bronze: 1, silver: 2, gold: 3 };
   const hasAccess = (requiredTier) => profile?.is_admin || tierRank[tier] >= tierRank[requiredTier];
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -728,10 +728,10 @@ export default function CryptoTrendDashboard() {
             )}
 
             {asset === "XRP" &&
-              (hasAccess("bronze") ? (
+              (hasAccess("gold") ? (
                 <NewsPanel key={asset} assetKey={asset} />
               ) : (
-                <LockedPanel title="뉴스 기반 심리" requiredTier="bronze" />
+                <LockedPanel title="뉴스 기반 심리" requiredTier="gold" />
               ))}
 
             {hasAccess("bronze") ? (
@@ -857,7 +857,7 @@ function PredictionAccuracyCard({ log, timeframe }) {
 }
 
 function TIER_LABEL(tier) {
-  return { free: "무료", bronze: "브론즈", silver: "실버" }[tier] || "무료";
+  return { free: "무료", bronze: "브론즈", silver: "실버", gold: "골드" }[tier] || "무료";
 }
 
 function AccountBar({ session, profile, authLoading, tier }) {
@@ -908,7 +908,7 @@ function AccountBar({ session, profile, authLoading, tier }) {
           )}
         </span>
         <div style={{ display: "flex", gap: 6 }}>
-          {tier !== "silver" && (
+          {tier !== "gold" && (
             <button onClick={() => setShowSubscribe(true)} style={styles.accountBtn}>
               구독하기
             </button>
@@ -1033,7 +1033,7 @@ function SubscribeModal({ profile, onClose }) {
           <>
             <div style={styles.tierCard}>
               <div style={styles.tierName}>브론즈 · 월 15,000원</div>
-              <div style={styles.tierDesc}>뉴스 기반 심리 + 예측시장 전망(Polymarket)</div>
+              <div style={styles.tierDesc}>예측시장 전망(Polymarket)</div>
               <button onClick={() => request("bronze")} style={styles.modalPrimaryBtn} disabled={requesting}>
                 브론즈 신청
               </button>
@@ -1043,6 +1043,13 @@ function SubscribeModal({ profile, onClose }) {
               <div style={styles.tierDesc}>브론즈 전체 + 실시간 청산 추적 + 대형 지갑 잔고 추적</div>
               <button onClick={() => request("silver")} style={styles.modalPrimaryBtn} disabled={requesting}>
                 실버 신청
+              </button>
+            </div>
+            <div style={styles.tierCard}>
+              <div style={styles.tierName}>골드 · 월 50,000원</div>
+              <div style={styles.tierDesc}>실버 전체 + 뉴스 기반 심리</div>
+              <button onClick={() => request("gold")} style={styles.modalPrimaryBtn} disabled={requesting}>
+                골드 신청
               </button>
             </div>
             {error && (
