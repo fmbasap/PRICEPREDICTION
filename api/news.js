@@ -4,8 +4,6 @@
 const ASSET_NAMES = {
   XRP: "XRP(리플)",
   FLR: "Flare(FLR, 플레어)",
-  BTC: "Bitcoin(BTC, 비트코인)",
-  SOL: "Solana(SOL, 솔라나)",
 };
 
 // 자산명과 무관한 고정 지시문 - 프롬프트 캐싱 대상 (cache_control 적용)
