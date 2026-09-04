@@ -48,18 +48,33 @@ const SCENARIOS = {
       "2026-12-15": { BTC: -6, ETH: -8, SOL: -10, XRP: -2 },
     },
   },
-  hold: {
-    label: "동결 + 클래리티법 불발 + 재정정책 유동성",
-    color: "#5B9BD5",
-    checkpoints: {
-      // 9/15 클래리티법 불발(XRP 개별 악재) + 9/16 FOMC 동결(공통, 아직 9/15엔 미반영)
-      "2026-09-15": { BTC: -1, ETH: -1.5, SOL: -2, XRP: -6 },
-      // FOMC 동결 안도 + 재정정책 유동성 서사가 붙기 시작
-      "2026-10-15": { BTC: 5, ETH: 7, SOL: 9, XRP: 8 },
-      "2026-11-15": { BTC: 9, ETH: 13, SOL: 16, XRP: 14 },
-      "2026-12-15": { BTC: 13, ETH: 19, SOL: 23, XRP: 20 },
-    },
-  },
+};
+
+// 참고용 가상 시나리오 (실측 검증 대상 아님, 서술 + 차트로만 제공)
+const HOLD_SCENARIO = {
+  title: "동결 + 클래리티법 불발 + 재정정책 유동성",
+  baseline: 1.37, // XRP 기준가 (2026-09-03)
+  narrative: [
+    "9월 15일, 미 의회의 디지털자산 시장구조법(CLARITY Act)이 최종 표결에서 불발됩니다. " +
+      "이건 XRP 생태계에 특히 아픈 소식인데, 최근 ETF 자금 유입과 기관 참여 확대가 상당 부분 " +
+      "\"규제 명확성\" 서사에 기대고 있었기 때문입니다. XRP는 이 소식에 단독으로 약 -6% 정도 " +
+      "빠질 것으로 가정합니다.",
+    "다음날인 9월 16일, FOMC는 시장이 우려하던 금리 인상 대신 동결을 선택합니다. 인상(당시 컨센서스 " +
+      "약 66%)보다는 안도감을 주지만, 인하만큼 화끈한 호재는 아니라서 완만한 반등(+4% 내외)에 그칩니다.",
+    "이후 몇 달간은 기준금리 자체는 그대로 묶여있지만, 재정정책(정부 지출·국채 발행 등)을 통한 " +
+      "유동성 공급이 위험자산 전반을 서서히 밀어올리는 그림을 가정합니다. 다만 클래리티법 불발이라는 " +
+      "앙금이 남아있어, 상단은 \"공격적 금리인하\" 시나리오만큼 뚫고 올라가진 못하는 것으로 설정했습니다.",
+  ],
+  points: [
+    { label: "9/3(현재)", pct: 0 },
+    { label: "9/14", pct: 0 },
+    { label: "9/15(클래리티 불발)", pct: -6 },
+    { label: "9/16(FOMC 동결)", pct: -2.2 },
+    { label: "9/30", pct: 3 },
+    { label: "10/15", pct: 8 },
+    { label: "11/15", pct: 14 },
+    { label: "12/15", pct: 20 },
+  ],
 };
 
 const TIMEFRAMES = {
@@ -695,8 +710,10 @@ export default function CryptoTrendDashboard() {
             {hasAccess("silver") ? (
               <ScenarioBattlePanel />
             ) : (
-              <LockedPanel title="시나리오 대결 (3파전)" requiredTier="silver" />
+              <LockedPanel title="시나리오 대결: 김광석 vs 컨센서스" requiredTier="silver" />
             )}
+
+            {hasAccess("silver") && <HoldScenarioNarrativePanel />}
 
             <footer style={styles.disclaimer}>
               이 화면의 추세 연장선은 최근 구간의 가격 흐름을 단순 선형 회귀로 연장한 통계적 참고선이며,
@@ -2110,6 +2127,81 @@ function PositioningPanel({ symbol, accent }) {
   );
 }
 
+function HoldScenarioNarrativePanel() {
+  const chartData = HOLD_SCENARIO.points.map((p) => ({
+    label: p.label,
+    pct: p.pct,
+    price: HOLD_SCENARIO.baseline * (1 + p.pct / 100),
+  }));
+
+  return (
+    <section style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>참고 시나리오: {HOLD_SCENARIO.title}</div>
+      </div>
+
+      <div style={{ ...styles.posNote, marginBottom: 4, color: "#5B9BD5" }}>
+        ※ 이 시나리오는 실제 검증 대상이 아니라, 가정을 바탕으로 그려본 가상 곡선입니다.
+      </div>
+
+      {HOLD_SCENARIO.narrative.map((p, i) => (
+        <p key={i} style={styles.holdNarrativeP}>
+          {p}
+        </p>
+      ))}
+
+      <ResponsiveContainer width="100%" height={220}>
+        <ComposedChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+          <CartesianGrid stroke="#232B27" strokeDasharray="2 4" vertical={false} />
+          <XAxis
+            dataKey="label"
+            stroke="#5B6660"
+            tick={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 9 }}
+            axisLine={{ stroke: "#232B27" }}
+            tickLine={false}
+            interval={0}
+            angle={-25}
+            textAnchor="end"
+            height={50}
+          />
+          <YAxis
+            stroke="#5B6660"
+            tick={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10 }}
+            domain={["auto", "auto"]}
+            tickFormatter={(v) => `$${v.toFixed(2)}`}
+            axisLine={false}
+            tickLine={false}
+            width={48}
+          />
+          <Tooltip
+            content={({ active, payload, label }) => {
+              if (!active || !payload || !payload.length) return null;
+              const d = payload[0].payload;
+              return (
+                <div style={styles.tooltip}>
+                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: "#8B948E" }}>
+                    {label}
+                  </div>
+                  <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 12, color: "#5B9BD5" }}>
+                    ${d.price.toFixed(3)} ({d.pct >= 0 ? "+" : ""}
+                    {d.pct}%)
+                  </div>
+                </div>
+              );
+            }}
+          />
+          <Line type="monotone" dataKey="price" stroke="#5B9BD5" strokeWidth={2} dot={{ r: 3, fill: "#5B9BD5" }} />
+        </ComposedChart>
+      </ResponsiveContainer>
+
+      <div style={{ ...styles.posNote, marginTop: 10 }}>
+        기준가 ${HOLD_SCENARIO.baseline} (2026-09-03 XRP 기준). 이 곡선은 가정이 전부 그대로 실현된다는
+        전제의 참고용 그림이며, 위 "시나리오 대결"처럼 실제 가격과 자동 비교·검증되지는 않습니다.
+      </div>
+    </section>
+  );
+}
+
 function ScenarioBattlePanel() {
   const [actuals, setActuals] = useState({}); // { "BTC:2026-09-15": price }
   const [loading, setLoading] = useState(false);
@@ -2205,7 +2297,7 @@ function ScenarioBattlePanel() {
   return (
     <section style={styles.newsCard}>
       <div style={styles.newsHeader}>
-        <div style={styles.tableTitle}>시나리오 대결 (3파전)</div>
+        <div style={styles.tableTitle}>시나리오 대결: 김광석 vs 컨센서스</div>
         <button onClick={evaluate} style={styles.newsBtn} disabled={loading}>
           <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
           평가
@@ -3055,6 +3147,12 @@ const styles = {
     fontSize: 8,
     color: "#EDEAE3",
     flexShrink: 0,
+  },
+  holdNarrativeP: {
+    fontSize: 13,
+    lineHeight: 1.7,
+    color: "#C7CCC8",
+    margin: "0 0 10px 0",
   },
   newsCard: {
     background: "#171D1A",
