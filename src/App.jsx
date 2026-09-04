@@ -1513,6 +1513,7 @@ function VolumeProfilePanel({ coinId, futuresSymbol, accent, currentPrice }) {
 
     const maxVol = Math.max(...bins.map((b) => b.volume));
     const pocIdx = bins.findIndex((b) => b.volume === maxVol);
+
     return { bins: bins.reverse(), maxVol, pocLow: bins[pocIdx]?.low, pocHigh: bins[pocIdx]?.high };
   };
 
@@ -1541,6 +1542,25 @@ function VolumeProfilePanel({ coinId, futuresSymbol, accent, currentPrice }) {
     fetchProfile();
   }, [fetchProfile]);
 
+  // 매물대(bins)는 그대로 두고, 현재가만 바뀌어도 여기서 즉시 재계산 (Binance 재조회 없음)
+  const soprMetrics = useMemo(() => {
+    if (!profile || currentPrice == null) return null;
+    let weightedSum = 0;
+    let totalVol = 0;
+    let profitVol = 0;
+    profile.bins.forEach((b) => {
+      const mid = (b.low + b.high) / 2;
+      weightedSum += mid * b.volume;
+      totalVol += b.volume;
+      if (mid < currentPrice) profitVol += b.volume;
+    });
+    if (totalVol === 0) return null;
+    const realizedPriceApprox = weightedSum / totalVol;
+    const soprApprox = currentPrice / realizedPriceApprox;
+    const profitSupplyPct = (profitVol / totalVol) * 100;
+    return { realizedPriceApprox, soprApprox, profitSupplyPct };
+  }, [profile, currentPrice]);
+
   return (
     <section style={styles.newsCard}>
       <div style={styles.newsHeader}>
@@ -1568,9 +1588,49 @@ function VolumeProfilePanel({ coinId, futuresSymbol, accent, currentPrice }) {
 
       {loading && !profile && <div style={styles.newsEmpty}>매물대 계산 중…</div>}
 
+      {soprMetrics && (
+        <div style={styles.posGrid}>
+          <div>
+            <div style={styles.posLabel}>근사 SOPR (실현가 대비)</div>
+            <div
+              style={{
+                ...styles.posValue,
+                color: soprMetrics.soprApprox >= 1 ? "#6FCB9F" : "#E2604F",
+              }}
+            >
+              {soprMetrics.soprApprox.toFixed(3)}
+            </div>
+            <div style={styles.posSub}>
+              {soprMetrics.soprApprox >= 1 ? "평균적으로 수익권" : "평균적으로 손실권"}
+            </div>
+          </div>
+          <div>
+            <div style={styles.posLabel}>근사 실현가격</div>
+            <div style={styles.posValue}>{fmtPrice(soprMetrics.realizedPriceApprox)}</div>
+            <div style={styles.posSub}>매물대 거래대금 가중평균</div>
+          </div>
+          <div style={{ gridColumn: "1 / -1" }}>
+            <div style={styles.posLabel}>수익권 물량 비율(근사)</div>
+            <div style={styles.splitBar}>
+              <div style={{ ...styles.splitBarLong, width: `${soprMetrics.profitSupplyPct.toFixed(1)}%` }} />
+            </div>
+            <div style={styles.posSplitRow}>
+              <span style={{ color: "#6FCB9F" }}>수익권 {soprMetrics.profitSupplyPct.toFixed(1)}%</span>
+              <span style={{ color: "#E2604F" }}>손실권 {(100 - soprMetrics.profitSupplyPct).toFixed(1)}%</span>
+            </div>
+          </div>
+          <div style={{ gridColumn: "1 / -1", ...styles.posNote }}>
+            이건 실제 온체인 SOPR(개별 코인 이동 시점 손익)이 아니라, 최근 90일 매물대(거래대금 분포)를
+            코스트베이시스로 간주해 근사한 지표입니다. XRP는 계정 기반 원장이라 진짜 SOPR 계산에 필요한
+            개별 코인 이동 이력 추적이 원천적으로 불가능하고, Glassnode 등의 유료 서비스가 쓰는 방법론과도
+            다릅니다 — 방향성 참고용으로만 봐주세요.
+          </div>
+        </div>
+      )}
+
       {profile && (
         <>
-          <div style={styles.vpList}>
+          <div style={{ ...styles.vpList, marginTop: 14 }}>
             {profile.bins.map((bin, i) => {
               const isPoc = bin.low === profile.pocLow;
               const isCurrent = currentPrice != null && currentPrice >= bin.low && currentPrice < bin.high;
