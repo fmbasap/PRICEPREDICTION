@@ -1774,21 +1774,36 @@ function KrwVolumeProfilePanel({ coinId, futuresSymbol, label, accent }) {
       setCurrentKrw(krwPrice);
 
       // 2) Binance 일봉으로 최대한 먼 과거까지 (한 번 호출로 최대 1000일 ≈ 2.7년)
+      // 다른 카드들도 동시에 Binance를 호출해서 순간적으로 막히는 경우가 있어,
+      // 약간의 지연 + 재시도를 넣어서 완화합니다.
       let candles;
-      try {
-        const binController = new AbortController();
-        const binTimeout = setTimeout(() => binController.abort(), 10000);
+      let binLastErr;
+      for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          const url = `https://api.binance.com/api/v3/klines?symbol=${futuresSymbol}&interval=1d&limit=1000`;
-          const res = await fetch(url, { signal: binController.signal });
-          if (!res.ok) throw new Error(`Binance 조회 실패 (${res.status})`);
-          candles = await res.json();
-          if (!candles.length) throw new Error("데이터가 없습니다");
-        } finally {
-          clearTimeout(binTimeout);
+          if (attempt === 0) {
+            await new Promise((r) => setTimeout(r, 300 + Math.random() * 500));
+          } else {
+            await new Promise((r) => setTimeout(r, 1000 * attempt));
+          }
+          const binController = new AbortController();
+          const binTimeout = setTimeout(() => binController.abort(), 10000);
+          try {
+            const url = `https://api.binance.com/api/v3/klines?symbol=${futuresSymbol}&interval=1d&limit=1000`;
+            const res = await fetch(url, { signal: binController.signal });
+            if (!res.ok) throw new Error(`Binance 조회 실패 (${res.status})`);
+            candles = await res.json();
+            if (!candles.length) throw new Error("데이터가 없습니다");
+          } finally {
+            clearTimeout(binTimeout);
+          }
+          binLastErr = null;
+          break;
+        } catch (e) {
+          binLastErr = e;
         }
-      } catch (e) {
-        throw new Error(`[Binance 조회 단계] ${e.name === "AbortError" ? "응답 시간 초과" : e.message}`);
+      }
+      if (binLastErr) {
+        throw new Error(`[Binance 조회 단계] ${binLastErr.name === "AbortError" ? "응답 시간 초과" : binLastErr.message} (3회 재시도 후 실패)`);
       }
 
       // 3) USD → KRW 환산 (범위는 실제 데이터의 최소~최대로 자동 설정, 자산마다 가격대가 달라서 고정 구간 대신 자동 계산)
