@@ -15,6 +15,8 @@ import { supabase, supabaseDebugInfo } from "./supabaseClient";
 const ASSETS = {
   FLR: { id: "flare-networks", label: "Flare", ticker: "FLR", accent: "#E8A33D", currency: "usd", futuresSymbol: "FLRUSDT" },
   XRP: { id: "ripple", label: "XRP", ticker: "XRP", accent: "#4FD1C5", currency: "usd", futuresSymbol: "XRPUSDT" },
+  BTC: { id: "bitcoin", label: "Bitcoin", ticker: "BTC", accent: "#F7931A", currency: "usd", futuresSymbol: "BTCUSDT" },
+  SOL: { id: "solana", label: "Solana", ticker: "SOL", accent: "#9945FF", currency: "usd", futuresSymbol: "SOLUSDT" },
 };
 
 // ---- 시나리오 대결: 김광석 교수(금리인하) vs 현재 컨센서스(금리인상 66%) ----
@@ -76,6 +78,31 @@ const HOLD_SCENARIO = {
     { label: "12/15", pct: 20 },
   ],
 };
+
+// 브래드 갈링하우스(Ripple CEO) 주요 발언·행보 타임라인 (고정 데이터, 웹검색 기반 정리)
+const GARLINGHOUSE_TIMELINE = [
+  { date: "2015-04", period: "합류", text: "Ripple에 합류." },
+  { date: "2016-11", period: "취임", text: "Ripple CEO로 공식 선임." },
+  { date: "2020-초", period: "IPO 언급", text: "크립토 기업의 IPO 가능성을 처음 언급, 업계는 본인 상장 시사로 해석." },
+  { date: "2020-12-22", period: "SEC 소송", text: "SEC가 Ripple·갈링하우스·전 CEO 크리스 라슨을 8년간 미등록 증권 판매 혐의로 제소." },
+  { date: "2021", period: "Consensus", text: "SEC 문제 해결을 전제로 Ripple 상장 가능성이 '매우 높다'고 언급." },
+  { date: "2021-12", period: "1주년 회고", text: "이 소송이 Ripple 하나가 아니라 크립토 산업 전체를 겨냥한 공격이라는 입장 재확인." },
+  { date: "2023-07-13", period: "1심 판결", text: "토레스 판사, 개인 매도분·거래소 프로그래매틱 판매는 승소, 방조 혐의는 재판行으로 남김." },
+  { date: "2024", period: "혐의 기각", text: "SEC가 방조 혐의 재판을 포기, 본인에 대한 모든 SEC 혐의 완전 기각." },
+  { date: "2025-03", period: "최종 승리", text: "SEC 항소 철회로 4년 넘는 소송 최종 종결. '크립토 전쟁에서의 승리'로 규정." },
+  { date: "2025-11", period: "Ripple Swell", text: "400억 달러 밸류에이션 5억 달러 투자 유치, Mastercard·Gemini 파트너십 발표." },
+  { date: "2025-12-03", period: "바이낸스 블록체인 위크", text: "'최근 몇 년 중 가장 낙관적'이라며 2026년을 '가장 강세일 해'로 지목." },
+  { date: "2026-01", period: "다보스 WEF", text: "스테이블코인 거래량 2024년 19조→2025년 33조 달러(약 75%↑) 성장세를 근거로 제시." },
+  { date: "2026-02", period: "클래리티법 전망", text: "4월까지 통과 확률 80~90% 제시, 이후 시점을 5월 말로 수정." },
+  { date: "2026-04-28", period: "XRP 라스베이거스", text: "'Lock in' 트윗 게시 — 과거 대형 발표 전 반복 사용한 표현이라 업계 주목." },
+  { date: "2026", period: "와이오밍 심포지엄", text: "비상장 만족 기조에서, 상장을 어느 때보다 적극 고려하는 쪽으로 입장 선회." },
+  {
+    date: "2026-07",
+    period: "KU 팟캐스트 회고",
+    text: "소송 기간 법률비용 1.5억 달러, 미국 사업 약 5년 정지, 회사 폐업까지 논의했었다고 공개. 본인만 벌금으로 끝내주겠다는 SEC 제안은 거절했다고 밝힘.",
+  },
+];
+
 
 const TIMEFRAMES = {
   hourly: {
@@ -522,6 +549,8 @@ export default function CryptoTrendDashboard() {
 
         <IndicesPanel />
 
+        <BitcoinDominancePanel />
+
         <div style={styles.subHeader}>
           <div style={styles.tfRow}>
             {Object.entries(TIMEFRAMES).map(([key, t]) => (
@@ -686,7 +715,13 @@ export default function CryptoTrendDashboard() {
               currentPrice={analysis.currentPrice}
             />
 
-            {asset === "XRP" && <XrpKrwVolumeProfilePanel />}
+            <KrwVolumeProfilePanel
+              key={`krwvp-${asset}`}
+              coinId={meta.id}
+              futuresSymbol={meta.futuresSymbol}
+              label={meta.label}
+              accent={meta.accent}
+            />
 
             {hasAccess("silver") ? (
               <LiquidationPanel key={`liq-${asset}`} symbol={meta.futuresSymbol} accent={meta.accent} />
@@ -694,15 +729,19 @@ export default function CryptoTrendDashboard() {
               <LockedPanel title="실시간 청산 추적" requiredTier="silver" />
             )}
 
-            {(asset === "XRP" || asset === "FLR") &&
-              (hasAccess("bronze") ? (
-                <NewsPanel key={asset} assetKey={asset} />
-              ) : (
-                <LockedPanel title="뉴스 기반 심리" requiredTier="bronze" />
-              ))}
+            {hasAccess("bronze") ? (
+              <NewsPanel key={asset} assetKey={asset} />
+            ) : (
+              <LockedPanel title="뉴스 기반 심리" requiredTier="bronze" />
+            )}
 
-            {asset === "XRP" &&
-              (hasAccess("bronze") ? <PredictionMarketPanel /> : <LockedPanel title="예측시장 전망 (Polymarket)" requiredTier="bronze" />)}
+            {hasAccess("bronze") ? (
+              <PredictionMarketPanel key={asset} assetKey={asset} />
+            ) : (
+              <LockedPanel title="예측시장 전망 (Polymarket)" requiredTier="bronze" />
+            )}
+
+            {asset === "XRP" && <GarlinghouseTimelinePanel />}
 
             {asset === "XRP" &&
               (hasAccess("silver") ? <ExchangeFlowPanel /> : <LockedPanel title="대형 지갑 잔고 추적" requiredTier="silver" />)}
@@ -1476,6 +1515,99 @@ function LiquidationPanel({ symbol, accent }) {
   );
 }
 
+function BitcoinDominancePanel() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const fetchDominance = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("https://api.coingecko.com/api/v3/global");
+      if (!res.ok) throw new Error(`조회에 실패했습니다 (${res.status})`);
+      const json = await res.json();
+      const d = json.data;
+      setData({
+        btcDominance: d.market_cap_percentage?.btc,
+        ethDominance: d.market_cap_percentage?.eth,
+        totalMarketCap: d.total_market_cap?.usd,
+        marketCapChange24h: d.market_cap_change_percentage_24h_usd,
+      });
+    } catch (e) {
+      setError(e.message || "도미넌스 데이터를 불러오지 못했습니다");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchDominance();
+  }, []);
+
+  return (
+    <section style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>비트코인 도미넌스</div>
+        <button onClick={fetchDominance} style={styles.newsBtn} disabled={loading}>
+          <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
+          갱신
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ ...styles.errorBox, marginBottom: 0 }}>
+          <AlertTriangle size={14} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {loading && !data && <div style={styles.newsEmpty}>조회 중…</div>}
+
+      {data && (
+        <div style={styles.posGrid}>
+          <div>
+            <div style={styles.posLabel}>BTC 도미넌스</div>
+            <div style={{ ...styles.posValue, color: "#F7931A" }}>
+              {data.btcDominance != null ? `${data.btcDominance.toFixed(1)}%` : "-"}
+            </div>
+            <div style={styles.posSub}>전체 시가총액 중 BTC 비중</div>
+          </div>
+          <div>
+            <div style={styles.posLabel}>ETH 도미넌스</div>
+            <div style={{ ...styles.posValue, color: "#8B948E" }}>
+              {data.ethDominance != null ? `${data.ethDominance.toFixed(1)}%` : "-"}
+            </div>
+            <div style={styles.posSub}>전체 시가총액 중 ETH 비중</div>
+          </div>
+          <div style={{ gridColumn: "1 / -1" }}>
+            <div style={styles.posLabel}>전체 암호화폐 시가총액</div>
+            <div style={styles.posValue}>
+              ${data.totalMarketCap != null ? (data.totalMarketCap / 1_000_000_000_000).toFixed(2) : "-"}
+              T
+            </div>
+            <div
+              style={{
+                ...styles.posSub,
+                color: data.marketCapChange24h >= 0 ? "#6FCB9F" : "#E2604F",
+              }}
+            >
+              {data.marketCapChange24h != null
+                ? `${data.marketCapChange24h >= 0 ? "+" : ""}${data.marketCapChange24h.toFixed(2)}% (24h)`
+                : "-"}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ ...styles.posNote, marginTop: 10 }}>
+        BTC 도미넌스가 오르면 자금이 BTC로 쏠리는(알트코인 상대적 약세) 국면, 내리면 알트코인으로 자금이
+        분산되는(알트시즌) 국면으로 흔히 해석됩니다. 데이터 출처: CoinGecko.
+      </div>
+    </section>
+  );
+}
+
 function IndicesPanel() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -1556,57 +1688,61 @@ function IndicesPanel() {
   );
 }
 
-function XrpKrwVolumeProfilePanel() {
+function KrwVolumeProfilePanel({ coinId, futuresSymbol, label, accent }) {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [krwRate, setKrwRate] = useState(null);
   const [currentKrw, setCurrentKrw] = useState(null);
 
-  const RANGE_MIN = 1000;
-  const RANGE_MAX = 5000;
   const BIN_COUNT = 20;
 
   const fetchProfile = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      // 1) USD/KRW 환율 확보 (CoinGecko가 XRP의 usd/krw 가격을 동시에 주므로 그 비율로 환율 역산)
+      // 1) USD/KRW 환율 확보 (해당 코인의 usd/krw 가격을 동시에 받아 그 비율로 환율 역산)
       const rateRes = await fetch(
-        "https://api.coingecko.com/api/v3/simple/price?ids=ripple&vs_currencies=usd,krw"
+        `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd,krw`
       );
       if (!rateRes.ok) throw new Error(`환율 조회 실패 (${rateRes.status})`);
       const rateJson = await rateRes.json();
-      const usdPrice = rateJson?.ripple?.usd;
-      const krwPrice = rateJson?.ripple?.krw;
+      const usdPrice = rateJson?.[coinId]?.usd;
+      const krwPrice = rateJson?.[coinId]?.krw;
       if (!usdPrice || !krwPrice) throw new Error("환율 데이터를 가져오지 못했습니다");
       const rate = krwPrice / usdPrice; // USD/KRW 환율
       setKrwRate(rate);
       setCurrentKrw(krwPrice);
 
-      // 2) Binance 일봉으로 최대한 먼 과거까지 (한 번 호출로 최대 1000일 ≈ 2.7년, ATH 시기까지 커버)
-      const url = `https://api.binance.com/api/v3/klines?symbol=XRPUSDT&interval=1d&limit=1000`;
+      // 2) Binance 일봉으로 최대한 먼 과거까지 (한 번 호출로 최대 1000일 ≈ 2.7년)
+      const url = `https://api.binance.com/api/v3/klines?symbol=${futuresSymbol}&interval=1d&limit=1000`;
       const res = await fetch(url);
       if (!res.ok) throw new Error(`Binance 조회 실패 (${res.status})`);
       const candles = await res.json();
       if (!candles.length) throw new Error("데이터가 없습니다");
 
-      // 3) USD → KRW 환산 후 고정 구간(₩1,000~₩5,000)으로 비닝
-      const binSize = (RANGE_MAX - RANGE_MIN) / BIN_COUNT;
+      // 3) USD → KRW 환산 (범위는 실제 데이터의 최소~최대로 자동 설정, 자산마다 가격대가 달라서 고정 구간 대신 자동 계산)
+      const points = candles.map((c) => ({
+        priceKrw: ((parseFloat(c[2]) + parseFloat(c[3]) + parseFloat(c[4])) / 3) * rate,
+        volumeKrw: parseFloat(c[7]) * rate,
+      }));
+
+      const priceValues = points.map((p) => p.priceKrw);
+      const minPrice = Math.min(...priceValues);
+      const maxPrice = Math.max(...priceValues);
+      const binSize = (maxPrice - minPrice) / BIN_COUNT || 1;
+
       const bins = Array.from({ length: BIN_COUNT }, (_, i) => ({
-        low: RANGE_MIN + i * binSize,
-        high: RANGE_MIN + (i + 1) * binSize,
+        low: minPrice + i * binSize,
+        high: minPrice + (i + 1) * binSize,
         volume: 0,
       }));
 
-      candles.forEach((c) => {
-        const typicalUsd = (parseFloat(c[2]) + parseFloat(c[3]) + parseFloat(c[4])) / 3;
-        const priceKrw = typicalUsd * rate;
-        if (priceKrw < RANGE_MIN || priceKrw >= RANGE_MAX) return; // 범위 밖은 제외
-        let idx = Math.floor((priceKrw - RANGE_MIN) / binSize);
+      points.forEach(({ priceKrw, volumeKrw }) => {
+        let idx = Math.floor((priceKrw - minPrice) / binSize);
         if (idx >= BIN_COUNT) idx = BIN_COUNT - 1;
         if (idx < 0) idx = 0;
-        bins[idx].volume += parseFloat(c[7]) * rate; // 달러 거래대금도 원화로 환산
+        bins[idx].volume += volumeKrw;
       });
 
       const maxVol = Math.max(...bins.map((b) => b.volume));
@@ -1614,21 +1750,25 @@ function XrpKrwVolumeProfilePanel() {
       const pocLow = bins[pocIdx]?.low;
       const pocHigh = bins[pocIdx]?.high;
 
-      setProfile({ bins: bins.reverse(), maxVol, pocLow, pocHigh });
+      setProfile({ bins: bins.reverse(), maxVol, pocLow, pocHigh, minPrice, maxPrice });
     } catch (e) {
       setError(e.message || "매물대 데이터를 불러오지 못했습니다");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [coinId, futuresSymbol]);
 
   useEffect(() => {
     fetchProfile();
   }, [fetchProfile]);
 
-  const fmtKrw = (v) => `₩${Math.round(v).toLocaleString("ko-KR")}`;
+  const fmtKrwSmart = (v) => {
+    // FLR처럼 원화 소액인 자산은 소수점까지, XRP처럼 큰 자산은 정수로
+    if (v < 100) return `₩${v.toFixed(2)}`;
+    return `₩${Math.round(v).toLocaleString("ko-KR")}`;
+  };
 
-  // 원화 매물대(₩1,000~₩5,000 구간) 기반 SOPR 근사치
+  // 원화 매물대(자동 범위) 기반 SOPR 근사치
   const krwSoprMetrics = useMemo(() => {
     if (!profile || currentKrw == null) return null;
     let weightedSum = 0;
@@ -1651,7 +1791,7 @@ function XrpKrwVolumeProfilePanel() {
     <section style={styles.newsCard}>
       <div style={styles.newsHeader}>
         <div style={styles.tableTitle}>
-          XRP 원화 매물대 (₩1,000~₩5,000, 최대 1000일)
+          {label} 원화 매물대 (자동 범위, 최대 1000일)
           {krwRate && <span style={styles.newsTimestamp}> · 환율 ₩{krwRate.toFixed(0)}/$</span>}
         </div>
         <button onClick={fetchProfile} style={styles.newsBtn} disabled={loading}>
@@ -1687,8 +1827,8 @@ function XrpKrwVolumeProfilePanel() {
           </div>
           <div>
             <div style={styles.posLabel}>근사 실현가격</div>
-            <div style={styles.posValue}>{fmtKrw(krwSoprMetrics.realizedPriceApprox)}</div>
-            <div style={styles.posSub}>₩1,000~₩5,000 구간 가중평균</div>
+            <div style={styles.posValue}>{fmtKrwSmart(krwSoprMetrics.realizedPriceApprox)}</div>
+            <div style={styles.posSub}>90~1000일 데이터 범위 가중평균</div>
           </div>
           <div style={{ gridColumn: "1 / -1" }}>
             <div style={styles.posLabel}>수익권 물량 비율(근사)</div>
@@ -1703,8 +1843,8 @@ function XrpKrwVolumeProfilePanel() {
             </div>
           </div>
           <div style={{ gridColumn: "1 / -1", ...styles.posNote }}>
-            ₩1,000~₩5,000 구간 안의 거래만으로 계산한 근사치입니다. 이 구간을 벗어난 과거 거래(예: 그 이하
-            가격대)는 포함되지 않아 실제 전체 보유자 손익과는 차이가 있을 수 있습니다.
+            조회된 과거 데이터 범위 안의 거래만으로 계산한 근사치입니다. Binance 상장 이전 거래는 포함되지
+            않습니다.
           </div>
         </div>
       )}
@@ -1713,8 +1853,7 @@ function XrpKrwVolumeProfilePanel() {
         <>
           {currentKrw != null && (
             <div style={{ ...styles.newsTimestamp, marginBottom: 8, marginTop: krwSoprMetrics ? 14 : 0 }}>
-              현재가 {fmtKrw(currentKrw)}
-              {(currentKrw < RANGE_MIN || currentKrw > RANGE_MAX) && " (지정 구간 밖에 있습니다)"}
+              현재가 {fmtKrwSmart(currentKrw)}
             </div>
           )}
           <div style={styles.vpList}>
@@ -1724,13 +1863,13 @@ function XrpKrwVolumeProfilePanel() {
               const widthPct = profile.maxVol > 0 ? (bin.volume / profile.maxVol) * 100 : 0;
               return (
                 <div key={i} style={styles.vpRow}>
-                  <span style={styles.vpPriceLabel}>{fmtKrw((bin.low + bin.high) / 2)}</span>
+                  <span style={styles.vpPriceLabel}>{fmtKrwSmart((bin.low + bin.high) / 2)}</span>
                   <div style={styles.vpBarTrack}>
                     <div
                       style={{
                         ...styles.vpBarFill,
                         width: `${Math.max(widthPct, bin.volume > 0 ? 2 : 0)}%`,
-                        background: isPoc ? "#E8A33D" : isCurrent ? "#4FD1C5" : "#5B9BD5",
+                        background: isPoc ? "#E8A33D" : isCurrent ? accent : "#5B9BD5",
                       }}
                     />
                   </div>
@@ -1741,9 +1880,10 @@ function XrpKrwVolumeProfilePanel() {
             })}
           </div>
           <div style={{ ...styles.posNote, marginTop: 10 }}>
-            Binance 상장 이후 최대 약 1,000일(일봉 기준, 2025년 ATH 시기 포함)치 거래대금을 <strong>현재 환율</strong>로
-            일괄 환산해서 ₩1,000~₩5,000 구간에 비닝한 매물대입니다. 실제로는 그 기간 동안 환율도 변동했기 때문에
-            정확한 당시 원화 가격과는 다소 오차가 있을 수 있습니다. 이 구간을 벗어난 거래대금은 집계에서 제외됩니다.
+            Binance 상장 이후 최대 약 1,000일(일봉 기준)치 거래대금을 <strong>현재 환율</strong>로 일괄
+            환산해서, 실제 가격이 오갔던 구간({fmtKrwSmart(profile.minPrice)}~{fmtKrwSmart(profile.maxPrice)})을
+            20개 칸으로 나눈 매물대입니다. 그 기간 동안 환율도 변동했기 때문에 당시 실제 원화 가격과는
+            다소 오차가 있을 수 있습니다.
           </div>
         </>
       )}
@@ -2467,17 +2607,56 @@ function ExchangeFlowPanel() {
   );
 }
 
-function PredictionMarketPanel() {
+function GarlinghouseTimelinePanel() {
+  return (
+    <section style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>갈링하우스(Ripple CEO) 발언 타임라인</div>
+      </div>
+      <div style={styles.timelineList}>
+        {GARLINGHOUSE_TIMELINE.map((item, i) => (
+          <div key={i} style={styles.timelineRow}>
+            <div style={styles.timelineDotCol}>
+              <div style={styles.timelineDot} />
+              {i < GARLINGHOUSE_TIMELINE.length - 1 && <div style={styles.timelineLine} />}
+            </div>
+            <div style={styles.timelineContent}>
+              <div style={styles.timelineDate}>
+                {item.date} <span style={styles.timelinePeriod}>· {item.period}</span>
+              </div>
+              <div style={styles.timelineText}>{item.text}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{ ...styles.posNote, marginTop: 10 }}>
+        공개된 인터뷰·SNS·보도자료를 바탕으로 정리한 고정 데이터입니다 (실시간 갱신 아님). 원문 그대로의
+        인용이 아니라 요약이며, 최신 발언은 별도로 추가해드릴 수 있습니다.
+      </div>
+    </section>
+  );
+}
+
+const PREDICTION_MARKET_QUERY = {
+  XRP: "XRP",
+  FLR: "Flare",
+  BTC: "Bitcoin",
+  SOL: "Solana",
+};
+
+function PredictionMarketPanel({ assetKey }) {
   const [markets, setMarkets] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [fetchedAt, setFetchedAt] = useState(null);
 
+  const queryTerm = PREDICTION_MARKET_QUERY[assetKey] || assetKey;
+
   const fetchMarkets = async () => {
     setLoading(true);
     setError(null);
     try {
-      const url = "/api/polymarket?q=XRP";
+      const url = `/api/polymarket?q=${encodeURIComponent(queryTerm)}`;
       const res = await fetch(url);
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || `예측시장 조회에 실패했습니다 (${res.status})`);
@@ -2545,7 +2724,7 @@ function PredictionMarketPanel() {
   return (
     <section style={styles.newsCard}>
       <div style={styles.newsHeader}>
-        <div style={styles.tableTitle}>예측시장 전망 (Polymarket)</div>
+        <div style={styles.tableTitle}>예측시장 전망 (Polymarket) · {queryTerm}</div>
         <button onClick={fetchMarkets} style={styles.newsBtn} disabled={loading}>
           <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
           {loading ? "조회 중…" : markets ? "다시 조회" : "불러오기"}
@@ -2561,8 +2740,8 @@ function PredictionMarketPanel() {
 
       {!markets && !loading && !error && (
         <div style={styles.newsEmpty}>
-          버튼을 눌러 Polymarket에서 실제 베팅이 걸린 XRP 관련 예측시장을 가져옵니다. 확률은 애널리스트 의견이
-          아니라 실제 돈을 건 트레이더들의 집단 예측입니다.
+          버튼을 눌러 Polymarket에서 실제 베팅이 걸린 {queryTerm} 관련 예측시장을 가져옵니다. 확률은
+          애널리스트 의견이 아니라 실제 돈을 건 트레이더들의 집단 예측입니다.
         </div>
       )}
 
@@ -3153,6 +3332,52 @@ const styles = {
     lineHeight: 1.7,
     color: "#C7CCC8",
     margin: "0 0 10px 0",
+  },
+  timelineList: {
+    display: "flex",
+    flexDirection: "column",
+  },
+  timelineRow: {
+    display: "flex",
+    gap: 10,
+  },
+  timelineDotCol: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    width: 10,
+    flexShrink: 0,
+  },
+  timelineDot: {
+    width: 8,
+    height: 8,
+    borderRadius: "50%",
+    background: "#5B9BD5",
+    marginTop: 4,
+    flexShrink: 0,
+  },
+  timelineLine: {
+    width: 1,
+    flex: 1,
+    background: "#232B27",
+    marginTop: 2,
+  },
+  timelineContent: {
+    paddingBottom: 14,
+  },
+  timelineDate: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 11,
+    color: "#5B9BD5",
+    marginBottom: 4,
+  },
+  timelinePeriod: {
+    color: "#5B6660",
+  },
+  timelineText: {
+    fontSize: 12.5,
+    lineHeight: 1.6,
+    color: "#C7CCC8",
   },
   newsCard: {
     background: "#171D1A",
