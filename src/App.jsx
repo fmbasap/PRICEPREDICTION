@@ -657,6 +657,8 @@ export default function CryptoTrendDashboard() {
               currentPrice={analysis.currentPrice}
             />
 
+            {asset === "XRP" && <XrpKrwVolumeProfilePanel />}
+
             {hasAccess("silver") ? (
               <LiquidationPanel key={`liq-${asset}`} symbol={meta.futuresSymbol} accent={meta.accent} />
             ) : (
@@ -1438,6 +1440,152 @@ function LiquidationPanel({ symbol, accent }) {
         anyLive && (
           <div style={{ ...styles.posNote, marginTop: 8 }}>아직 감지된 청산이 없습니다.</div>
         )
+      )}
+    </section>
+  );
+}
+
+function XrpKrwVolumeProfilePanel() {
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [krwRate, setKrwRate] = useState(null);
+  const [currentKrw, setCurrentKrw] = useState(null);
+
+  const RANGE_MIN = 1000;
+  const RANGE_MAX = 5000;
+  const BIN_COUNT = 20;
+
+  const fetchProfile = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      // 1) USD/KRW 환율 확보 (CoinGecko가 XRP의 usd/krw 가격을 동시에 주므로 그 비율로 환율 역산)
+      const rateRes = await fetch(
+        "https://api.coingecko.com/api/v3/simple/price?ids=ripple&vs_currencies=usd,krw"
+      );
+      if (!rateRes.ok) throw new Error(`환율 조회 실패 (${rateRes.status})`);
+      const rateJson = await rateRes.json();
+      const usdPrice = rateJson?.ripple?.usd;
+      const krwPrice = rateJson?.ripple?.krw;
+      if (!usdPrice || !krwPrice) throw new Error("환율 데이터를 가져오지 못했습니다");
+      const rate = krwPrice / usdPrice; // USD/KRW 환율
+      setKrwRate(rate);
+      setCurrentKrw(krwPrice);
+
+      // 2) Binance 15분봉 90일치 페이지네이션 (USDT 기준)
+      const intervalMs = 15 * 60 * 1000;
+      const totalCandles = 90 * 24 * 4;
+      let candles = [];
+      let endTime = Date.now();
+      while (candles.length < totalCandles) {
+        const limit = Math.min(1000, totalCandles - candles.length);
+        const url = `https://api.binance.com/api/v3/klines?symbol=XRPUSDT&interval=15m&endTime=${endTime}&limit=${limit}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Binance 조회 실패 (${res.status})`);
+        const data = await res.json();
+        if (!data.length) break;
+        candles = data.concat(candles);
+        endTime = data[0][0] - intervalMs;
+        if (data.length < limit) break;
+      }
+      if (candles.length === 0) throw new Error("데이터가 없습니다");
+
+      // 3) USD → KRW 환산 후 고정 구간(₩1,000~₩5,000)으로 비닝
+      const binSize = (RANGE_MAX - RANGE_MIN) / BIN_COUNT;
+      const bins = Array.from({ length: BIN_COUNT }, (_, i) => ({
+        low: RANGE_MIN + i * binSize,
+        high: RANGE_MIN + (i + 1) * binSize,
+        volume: 0,
+      }));
+
+      candles.forEach((c) => {
+        const typicalUsd = (parseFloat(c[2]) + parseFloat(c[3]) + parseFloat(c[4])) / 3;
+        const priceKrw = typicalUsd * rate;
+        if (priceKrw < RANGE_MIN || priceKrw >= RANGE_MAX) return; // 범위 밖은 제외
+        let idx = Math.floor((priceKrw - RANGE_MIN) / binSize);
+        if (idx >= BIN_COUNT) idx = BIN_COUNT - 1;
+        if (idx < 0) idx = 0;
+        bins[idx].volume += parseFloat(c[7]) * rate; // 달러 거래대금도 원화로 환산
+      });
+
+      const maxVol = Math.max(...bins.map((b) => b.volume));
+      const pocIdx = bins.findIndex((b) => b.volume === maxVol);
+      const pocLow = bins[pocIdx]?.low;
+      const pocHigh = bins[pocIdx]?.high;
+
+      setProfile({ bins: bins.reverse(), maxVol, pocLow, pocHigh });
+    } catch (e) {
+      setError(e.message || "매물대 데이터를 불러오지 못했습니다");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchProfile();
+  }, [fetchProfile]);
+
+  const fmtKrw = (v) => `₩${Math.round(v).toLocaleString("ko-KR")}`;
+
+  return (
+    <section style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>
+          XRP 원화 매물대 (₩1,000~₩5,000)
+          {krwRate && <span style={styles.newsTimestamp}> · 환율 ₩{krwRate.toFixed(0)}/$</span>}
+        </div>
+        <button onClick={fetchProfile} style={styles.newsBtn} disabled={loading}>
+          <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
+          갱신
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ ...styles.errorBox, marginBottom: 0 }}>
+          <AlertTriangle size={14} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {loading && !profile && <div style={styles.newsEmpty}>매물대 계산 중…</div>}
+
+      {profile && (
+        <>
+          {currentKrw != null && (
+            <div style={{ ...styles.newsTimestamp, marginBottom: 8 }}>
+              현재가 {fmtKrw(currentKrw)}
+              {(currentKrw < RANGE_MIN || currentKrw > RANGE_MAX) && " (지정 구간 밖에 있습니다)"}
+            </div>
+          )}
+          <div style={styles.vpList}>
+            {profile.bins.map((bin, i) => {
+              const isPoc = bin.low === profile.pocLow;
+              const isCurrent = currentKrw != null && currentKrw >= bin.low && currentKrw < bin.high;
+              const widthPct = profile.maxVol > 0 ? (bin.volume / profile.maxVol) * 100 : 0;
+              return (
+                <div key={i} style={styles.vpRow}>
+                  <span style={styles.vpPriceLabel}>{fmtKrw((bin.low + bin.high) / 2)}</span>
+                  <div style={styles.vpBarTrack}>
+                    <div
+                      style={{
+                        ...styles.vpBarFill,
+                        width: `${Math.max(widthPct, bin.volume > 0 ? 2 : 0)}%`,
+                        background: isPoc ? "#E8A33D" : isCurrent ? "#4FD1C5" : "#5B9BD5",
+                      }}
+                    />
+                  </div>
+                  {isCurrent && <span style={styles.vpCurrentTag}>현재가</span>}
+                  {isPoc && !isCurrent && <span style={{ ...styles.vpCurrentTag, color: "#E8A33D" }}>POC</span>}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ ...styles.posNote, marginTop: 10 }}>
+            최근 90일 Binance 15분봉 거래대금을 실시간 환율로 원화 환산해서, ₩1,000~₩5,000 구간에만 고정해
+            비닝한 매물대입니다. 이 구간을 벗어난 거래대금은 집계에서 제외됩니다.
+          </div>
+        </>
       )}
     </section>
   );
