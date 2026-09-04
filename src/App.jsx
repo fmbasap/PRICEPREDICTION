@@ -1473,23 +1473,12 @@ function XrpKrwVolumeProfilePanel() {
       setKrwRate(rate);
       setCurrentKrw(krwPrice);
 
-      // 2) Binance 15분봉 90일치 페이지네이션 (USDT 기준)
-      const intervalMs = 15 * 60 * 1000;
-      const totalCandles = 90 * 24 * 4;
-      let candles = [];
-      let endTime = Date.now();
-      while (candles.length < totalCandles) {
-        const limit = Math.min(1000, totalCandles - candles.length);
-        const url = `https://api.binance.com/api/v3/klines?symbol=XRPUSDT&interval=15m&endTime=${endTime}&limit=${limit}`;
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`Binance 조회 실패 (${res.status})`);
-        const data = await res.json();
-        if (!data.length) break;
-        candles = data.concat(candles);
-        endTime = data[0][0] - intervalMs;
-        if (data.length < limit) break;
-      }
-      if (candles.length === 0) throw new Error("데이터가 없습니다");
+      // 2) Binance 일봉으로 최대한 먼 과거까지 (한 번 호출로 최대 1000일 ≈ 2.7년, ATH 시기까지 커버)
+      const url = `https://api.binance.com/api/v3/klines?symbol=XRPUSDT&interval=1d&limit=1000`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Binance 조회 실패 (${res.status})`);
+      const candles = await res.json();
+      if (!candles.length) throw new Error("데이터가 없습니다");
 
       // 3) USD → KRW 환산 후 고정 구간(₩1,000~₩5,000)으로 비닝
       const binSize = (RANGE_MAX - RANGE_MIN) / BIN_COUNT;
@@ -1532,7 +1521,7 @@ function XrpKrwVolumeProfilePanel() {
     <section style={styles.newsCard}>
       <div style={styles.newsHeader}>
         <div style={styles.tableTitle}>
-          XRP 원화 매물대 (₩1,000~₩5,000)
+          XRP 원화 매물대 (₩1,000~₩5,000, 최대 1000일)
           {krwRate && <span style={styles.newsTimestamp}> · 환율 ₩{krwRate.toFixed(0)}/$</span>}
         </div>
         <button onClick={fetchProfile} style={styles.newsBtn} disabled={loading}>
@@ -1582,8 +1571,9 @@ function XrpKrwVolumeProfilePanel() {
             })}
           </div>
           <div style={{ ...styles.posNote, marginTop: 10 }}>
-            최근 90일 Binance 15분봉 거래대금을 실시간 환율로 원화 환산해서, ₩1,000~₩5,000 구간에만 고정해
-            비닝한 매물대입니다. 이 구간을 벗어난 거래대금은 집계에서 제외됩니다.
+            Binance 상장 이후 최대 약 1,000일(일봉 기준, 2025년 ATH 시기 포함)치 거래대금을 <strong>현재 환율</strong>로
+            일괄 환산해서 ₩1,000~₩5,000 구간에 비닝한 매물대입니다. 실제로는 그 기간 동안 환율도 변동했기 때문에
+            정확한 당시 원화 가격과는 다소 오차가 있을 수 있습니다. 이 구간을 벗어난 거래대금은 집계에서 제외됩니다.
           </div>
         </>
       )}
