@@ -27,6 +27,9 @@ const SCENARIO_COINS = {
 };
 
 // 각 체크포인트에서의 누적 변화율(%) - 2026-09-03 기준 작성
+// 시나리오를 처음 정의한 기준일 - "예측한 시점"으로 삼아 경과시간 계산에 사용
+const SCENARIO_BASELINE_DATE = "2026-09-03";
+
 const SCENARIOS = {
   kim: {
     label: "김광석 시나리오 (공격적 금리인하)",
@@ -811,16 +814,52 @@ export default function CryptoTrendDashboard() {
   );
 }
 
+// 시간대(horizon)별 가중치 - 멀리 내다본 예측일수록 맞히기 어려우므로 가중치를 높게 줌
+// 시간대(horizon)별 가중치
+// 1h=1점, 2h=2점, 3h=3점까지는 그대로. 그 이후로는 시간이 2배가 될 때마다 +1점씩 늘어나서
+// (6h=4, 12h=5, 24h=6, 48h=7, 96h=8, 192h=9, 384h=10, ...) 최대 30점까지 증가합니다.
+function getHorizonWeight(hours) {
+  if (hours <= 1) return 1;
+  if (hours <= 2) return 2;
+  if (hours <= 3) return 3;
+  let h = 3;
+  let point = 3;
+  while (hours > h && point < 30) {
+    h *= 2;
+    point += 1;
+  }
+  return Math.min(point, 30);
+}
+
 function PredictionAccuracyCard({ log, timeframe }) {
   const resolved = log.flatMap((batch) =>
-    batch.targets.filter((t) => t.resolved).map((t) => ({ ...t, createdAt: batch.createdAt }))
+    batch.targets
+      .filter((t) => t.resolved)
+      .map((t) => ({ ...t, createdAt: batch.createdAt, basePrice: batch.basePrice }))
   );
   const pendingCount = log.reduce((sum, b) => sum + b.targets.filter((t) => !t.resolved).length, 0);
-  const recent = [...resolved].sort((a, b) => b.ts - a.ts).slice(0, 8);
 
   const errors = resolved.map((t) => ((t.actual - t.predicted) / t.predicted) * 100);
   const mape = errors.length ? errors.reduce((a, b) => a + Math.abs(b), 0) / errors.length : null;
   const bias = errors.length ? errors.reduce((a, b) => a + b, 0) / errors.length : null;
+
+  // ---- 자기강화 점수: 방향 적중 여부 × 시간대 가중치 ----
+  const scored = resolved.map((t) => {
+    const horizonHours = Math.max(0.01, (t.ts - t.createdAt) / (60 * 60 * 1000));
+    const predictedDir = t.predicted - t.basePrice;
+    const actualDir = t.actual - t.basePrice;
+    // 둘 다 거의 안 움직인(횡보) 경우는 판정에서 제외
+    const isFlat = Math.abs(predictedDir) < 1e-9 || Math.abs(actualDir) < 1e-9;
+    const isHit = !isFlat && Math.sign(predictedDir) === Math.sign(actualDir);
+    const weight = getHorizonWeight(horizonHours);
+    const points = isFlat ? 0 : isHit ? weight : -7;
+    return { ...t, horizonHours, isHit, isFlat, weight, points };
+  });
+  const judged = scored.filter((s) => !s.isFlat);
+  const totalScore = judged.reduce((a, b) => a + b.points, 0);
+  const hitCount = judged.filter((s) => s.isHit).length;
+  const missCount = judged.length - hitCount;
+  const hitRate = judged.length ? (hitCount / judged.length) * 100 : null;
 
   return (
     <section style={styles.newsCard}>
@@ -828,6 +867,28 @@ function PredictionAccuracyCard({ log, timeframe }) {
         <div style={styles.tableTitle}>예측 정확도 기록</div>
         {pendingCount > 0 && <div style={styles.newsTimestamp}>검증 대기 {pendingCount}건</div>}
       </div>
+
+      {judged.length > 0 && (
+        <div style={{ ...styles.posGrid, marginBottom: 14 }}>
+          <div>
+            <div style={styles.posLabel}>자기강화 점수 (시간대 가중)</div>
+            <div style={{ ...styles.posValue, color: totalScore >= 0 ? "#6FCB9F" : "#E2604F" }}>
+              {totalScore >= 0 ? "+" : ""}
+              {totalScore}점
+            </div>
+            <div style={styles.posSub}>
+              적중 {hitCount}건(가중치만큼 가산) / 미적중 {missCount}건(-7점씩)
+            </div>
+          </div>
+          <div>
+            <div style={styles.posLabel}>방향 적중률</div>
+            <div style={styles.posValue}>{hitRate != null ? `${hitRate.toFixed(1)}%` : "-"}</div>
+            <div style={styles.posSub}>
+              1h:1점 · 2h:2점 · 3h:3점, 이후 2배가 될 때마다 +1점 (최대 30점) · 오답 -7점
+            </div>
+          </div>
+        </div>
+      )}
 
       {resolved.length === 0 ? (
         <div style={styles.newsEmpty}>
@@ -859,29 +920,43 @@ function PredictionAccuracyCard({ log, timeframe }) {
                 <th style={{ ...styles.th, textAlign: "right" }}>예측가</th>
                 <th style={{ ...styles.th, textAlign: "right" }}>실제가</th>
                 <th style={{ ...styles.th, textAlign: "right" }}>오차</th>
+                <th style={{ ...styles.th, textAlign: "right" }}>점수</th>
               </tr>
             </thead>
             <tbody>
-              {recent.map((t, i) => {
-                const err = ((t.actual - t.predicted) / t.predicted) * 100;
-                return (
-                  <tr key={i} style={i % 2 === 1 ? styles.trAlt : undefined}>
-                    <td style={styles.td}>{fmtLabel(t.ts, timeframe)}</td>
-                    <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(t.predicted)}</td>
-                    <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(t.actual)}</td>
-                    <td
-                      style={{
-                        ...styles.td,
-                        textAlign: "right",
-                        color: err >= 0 ? "#6FCB9F" : "#E2604F",
-                      }}
-                    >
-                      {err >= 0 ? "+" : ""}
-                      {err.toFixed(2)}%
-                    </td>
-                  </tr>
-                );
-              })}
+              {[...scored]
+                .sort((a, b) => b.ts - a.ts)
+                .slice(0, 8)
+                .map((t, i) => {
+                  const err = ((t.actual - t.predicted) / t.predicted) * 100;
+                  return (
+                    <tr key={i} style={i % 2 === 1 ? styles.trAlt : undefined}>
+                      <td style={styles.td}>{fmtLabel(t.ts, timeframe)}</td>
+                      <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(t.predicted)}</td>
+                      <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(t.actual)}</td>
+                      <td
+                        style={{
+                          ...styles.td,
+                          textAlign: "right",
+                          color: err >= 0 ? "#6FCB9F" : "#E2604F",
+                        }}
+                      >
+                        {err >= 0 ? "+" : ""}
+                        {err.toFixed(2)}%
+                      </td>
+                      <td
+                        style={{
+                          ...styles.td,
+                          textAlign: "right",
+                          color: t.isFlat ? "#5B6660" : t.isHit ? "#6FCB9F" : "#E2604F",
+                          fontWeight: 600,
+                        }}
+                      >
+                        {t.isFlat ? "-" : `${t.points >= 0 ? "+" : ""}${t.points}`}
+                      </td>
+                    </tr>
+                  );
+                })}
             </tbody>
           </table>
         </>
@@ -2524,6 +2599,77 @@ function ScenarioBattlePanel() {
     return errors.reduce((a, b) => a + b, 0) / errors.length;
   };
 
+  // ---- 시간대 가중 자기강화 점수 (예측 정확도 기록과 같은 룰) ----
+  // "예측한 시점" = SCENARIO_BASELINE_DATE, 거기서부터 각 체크포인트까지의 경과시간으로 가중치를 매김.
+  // 코인별로 방향(상승/하락) 적중 여부를 판정해서, 적중이면 그 시간대 가중치, 틀리면 -7점.
+  const baselineMs = new Date(SCENARIO_BASELINE_DATE + "T00:00:00Z").getTime();
+  const scenarioScores = useMemo(() => {
+    const scores = {};
+    Object.keys(SCENARIOS).forEach((sKey) => {
+      let total = 0;
+      let hit = 0;
+      let miss = 0;
+      passedCheckpoints.forEach((cpDate) => {
+        const horizonHours = Math.max(
+          0.01,
+          (new Date(cpDate + "T00:00:00Z").getTime() - baselineMs) / (60 * 60 * 1000)
+        );
+        const weight = getHorizonWeight(horizonHours);
+        Object.entries(SCENARIO_COINS).forEach(([coinKey, coinMeta]) => {
+          const actual = actuals[`${coinKey}:${cpDate}`];
+          if (actual == null) return;
+          const predictedPct = SCENARIOS[sKey].checkpoints[cpDate][coinKey];
+          const actualPct = ((actual - coinMeta.baseline) / coinMeta.baseline) * 100;
+          if (Math.abs(predictedPct) < 1e-9 || Math.abs(actualPct) < 1e-9) return; // 횡보는 판정 제외
+          const isHit = Math.sign(predictedPct) === Math.sign(actualPct);
+          total += isHit ? weight : -7;
+          if (isHit) hit += 1;
+          else miss += 1;
+        });
+      });
+      scores[sKey] = { total, hit, miss };
+    });
+    return scores;
+  }, [passedCheckpoints, actuals, baselineMs]);
+
+  // ---- 자기강화 블렌드 예측 ----
+  // 지금까지 지난 체크포인트들의 평균 오차로 시나리오별 가중치를 매기고(오차가 작을수록 가중치 큼),
+  // 아직 안 지난 체크포인트는 이 가중치로 두 시나리오를 섞은 블렌드 예측가를 보여줌.
+  // 체크포인트가 실측될 때마다 가중치가 갱신되므로, 더 잘 맞춰온 시나리오 쪽으로 예측이 스스로 기움.
+  const scenarioWeights = useMemo(() => {
+    const avgErrByScenario = {};
+    Object.keys(SCENARIOS).forEach((key) => {
+      const errs = passedCheckpoints
+        .map((cp) => computeErrorForCheckpoint(key, cp))
+        .filter((e) => e != null);
+      avgErrByScenario[key] = errs.length ? errs.reduce((a, b) => a + b, 0) / errs.length : null;
+    });
+
+    const validEntries = Object.entries(avgErrByScenario).filter(([, e]) => e != null);
+    if (validEntries.length === 0) {
+      // 아직 검증된 데이터가 없으면 균등 가중치
+      const equal = 1 / Object.keys(SCENARIOS).length;
+      return Object.fromEntries(Object.keys(SCENARIOS).map((k) => [k, equal]));
+    }
+
+    // 가중치 ∝ 1/오차 (오차 0에 가까운 경우를 대비해 아주 작은 값 더함)
+    const inv = {};
+    let sum = 0;
+    Object.keys(SCENARIOS).forEach((key) => {
+      const e = avgErrByScenario[key];
+      const w = e != null ? 1 / (e + 0.01) : 0;
+      inv[key] = w;
+      sum += w;
+    });
+    const weights = {};
+    Object.keys(SCENARIOS).forEach((key) => {
+      weights[key] = sum > 0 ? inv[key] / sum : 1 / Object.keys(SCENARIOS).length;
+    });
+    return weights;
+  }, [passedCheckpoints, actuals]);
+
+  const futureCheckpoints = checkpointDates.filter((d) => !passedCheckpoints.includes(d));
+
   return (
     <section style={styles.newsCard}>
       <div style={styles.newsHeader}>
@@ -2607,6 +2753,104 @@ function ScenarioBattlePanel() {
         오차(%)는 BTC/ETH/SOL/XRP 4개 자산의 "시나리오 목표가 대비 실제가 괴리율" 평균입니다. 작을수록 그
         시나리오가 현실에 가까웠다는 뜻입니다. 실제가는 CoinGecko 해당 날짜 종가 기준이며, 한 번 기록되면
         고정됩니다.
+      </div>
+
+      {passedCheckpoints.length > 0 && (
+        <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid #232B27" }}>
+          <div style={styles.tableTitle}>시간대 가중 점수 (예측 정확도 기록과 같은 룰)</div>
+          <div style={styles.posGrid}>
+            {Object.entries(SCENARIOS).map(([key, s]) => (
+              <div key={key}>
+                <div style={{ ...styles.posLabel, color: s.color }}>{s.label.split(" ")[0]}</div>
+                <div
+                  style={{
+                    ...styles.posValue,
+                    color: scenarioScores[key].total >= 0 ? "#6FCB9F" : "#E2604F",
+                  }}
+                >
+                  {scenarioScores[key].total >= 0 ? "+" : ""}
+                  {scenarioScores[key].total}점
+                </div>
+                <div style={styles.posSub}>
+                  적중 {scenarioScores[key].hit}건 / 미적중 {scenarioScores[key].miss}건
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{ ...styles.posNote, marginTop: 8 }}>
+            {SCENARIO_BASELINE_DATE}(예측 시점) 기준 각 체크포인트까지의 경과시간에 시간대 가중치(1h:1점 ·
+            2h:2점 · 3h:3점, 이후 2배가 될 때마다 +1점, 최대 30점)를 적용합니다. 코인·체크포인트별로
+            방향(상승/하락) 적중 시 가중치만큼 +점, 틀리면 -7점입니다.
+          </div>
+        </div>
+      )}
+
+      <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid #232B27" }}>
+        <div style={styles.tableTitle}>자기강화 블렌드 예측</div>
+        <div style={styles.posNote}>
+          지금까지 적중률(오차 역수)로 가중치를 매김:{" "}
+          {Object.entries(SCENARIOS).map(([key, s], i) => (
+            <span key={key}>
+              {i > 0 && " / "}
+              <span style={{ color: s.color, fontWeight: 600 }}>
+                {s.label.split(" ")[0]} {(scenarioWeights[key] * 100).toFixed(0)}%
+              </span>
+            </span>
+          ))}
+        </div>
+
+        {futureCheckpoints.length === 0 ? (
+          <div style={{ ...styles.newsEmpty, marginTop: 8 }}>모든 체크포인트가 이미 지났습니다.</div>
+        ) : (
+          <table style={{ ...styles.table, marginTop: 10 }}>
+            <thead>
+              <tr>
+                <th style={styles.th}>체크포인트</th>
+                {Object.keys(SCENARIO_COINS).map((coinKey) => (
+                  <th key={coinKey} style={{ ...styles.th, textAlign: "right" }}>
+                    {coinKey}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {futureCheckpoints.map((cpDate, i) => (
+                <tr key={cpDate} style={i % 2 === 1 ? styles.trAlt : undefined}>
+                  <td style={styles.td}>{cpDate}</td>
+                  {Object.entries(SCENARIO_COINS).map(([coinKey, coinMeta]) => {
+                    let blendedPct = 0;
+                    Object.keys(SCENARIOS).forEach((sKey) => {
+                      const pct = SCENARIOS[sKey].checkpoints[cpDate]?.[coinKey] ?? 0;
+                      blendedPct += pct * scenarioWeights[sKey];
+                    });
+                    const blendedPrice = coinMeta.baseline * (1 + blendedPct / 100);
+                    return (
+                      <td key={coinKey} style={{ ...styles.td, textAlign: "right" }}>
+                        {fmtPrice(blendedPrice)}
+                        <span
+                          style={{
+                            color: blendedPct >= 0 ? "#6FCB9F" : "#E2604F",
+                            fontSize: 10,
+                            marginLeft: 4,
+                          }}
+                        >
+                          ({blendedPct >= 0 ? "+" : ""}
+                          {blendedPct.toFixed(1)}%)
+                        </span>
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <div style={{ ...styles.posNote, marginTop: 8 }}>
+          체크포인트가 하나씩 실측될 때마다 가중치가 자동으로 갱신되어, 지금까지 더 잘 맞춰온 시나리오 쪽으로
+          다음 예측이 스스로 기울어집니다. 검증 데이터가 아직 없을 땐 두 시나리오를 50:50으로 섞어서
+          보여줍니다.
+        </div>
       </div>
     </section>
   );
