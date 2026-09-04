@@ -505,6 +505,8 @@ export default function CryptoTrendDashboard() {
           </div>
         </header>
 
+        <IndicesPanel />
+
         <div style={styles.subHeader}>
           <div style={styles.tfRow}>
             {Object.entries(TIMEFRAMES).map(([key, t]) => (
@@ -670,8 +672,6 @@ export default function CryptoTrendDashboard() {
             />
 
             {asset === "XRP" && <XrpKrwVolumeProfilePanel />}
-
-            {asset === "XRP" && <IndicesPanel />}
 
             {hasAccess("silver") ? (
               <LiquidationPanel key={`liq-${asset}`} symbol={meta.futuresSymbol} accent={meta.accent} />
