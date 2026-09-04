@@ -17,6 +17,8 @@ const ASSETS = {
   XRP: { id: "ripple", label: "XRP", ticker: "XRP", accent: "#4FD1C5", currency: "usd", futuresSymbol: "XRPUSDT" },
   BTC: { id: "bitcoin", label: "Bitcoin", ticker: "BTC", accent: "#F7931A", currency: "usd", futuresSymbol: "BTCUSDT" },
   SOL: { id: "solana", label: "Solana", ticker: "SOL", accent: "#9945FF", currency: "usd", futuresSymbol: "SOLUSDT" },
+  LINK: { id: "chainlink", label: "Chainlink", ticker: "LINK", accent: "#2A5ADA", currency: "usd", futuresSymbol: "LINKUSDT" },
+  UNI: { id: "uniswap", label: "Uniswap", ticker: "UNI", accent: "#FF007A", currency: "usd", futuresSymbol: "UNIUSDT" },
 };
 
 // ---- 시나리오 대결: 김광석 교수(금리인하) vs 현재 컨센서스(금리인상 66%) ----
@@ -528,6 +530,10 @@ export default function CryptoTrendDashboard() {
 
         {profile?.is_admin && <AdminPanel />}
 
+        <IndicesPanel />
+
+        <BitcoinDominancePanel />
+
         <header style={styles.header}>
           <div style={styles.tabRow}>
             {Object.entries(ASSETS).map(([key, m]) => (
@@ -546,10 +552,6 @@ export default function CryptoTrendDashboard() {
             ))}
           </div>
         </header>
-
-        <IndicesPanel />
-
-        <BitcoinDominancePanel />
 
         <div style={styles.subHeader}>
           <div style={styles.tfRow}>
@@ -2642,6 +2644,8 @@ const PREDICTION_MARKET_QUERY = {
   FLR: "Flare",
   BTC: "Bitcoin",
   SOL: "Solana",
+  LINK: "Chainlink",
+  UNI: "Uniswap",
 };
 
 function PredictionMarketPanel({ assetKey }) {
