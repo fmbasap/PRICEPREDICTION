@@ -1513,8 +1513,10 @@ function VolumeProfilePanel({ coinId, futuresSymbol, accent, currentPrice }) {
 
     const maxVol = Math.max(...bins.map((b) => b.volume));
     const pocIdx = bins.findIndex((b) => b.volume === maxVol);
+    const pocLow = bins[pocIdx]?.low;
+    const pocHigh = bins[pocIdx]?.high;
 
-    return { bins: bins.reverse(), maxVol, pocLow: bins[pocIdx]?.low, pocHigh: bins[pocIdx]?.high };
+    return { bins: bins.reverse(), maxVol, pocLow, pocHigh };
   };
 
   const fetchProfile = useCallback(async () => {
