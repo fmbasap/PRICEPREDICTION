@@ -1517,6 +1517,25 @@ function XrpKrwVolumeProfilePanel() {
 
   const fmtKrw = (v) => `₩${Math.round(v).toLocaleString("ko-KR")}`;
 
+  // 원화 매물대(₩1,000~₩5,000 구간) 기반 SOPR 근사치
+  const krwSoprMetrics = useMemo(() => {
+    if (!profile || currentKrw == null) return null;
+    let weightedSum = 0;
+    let totalVol = 0;
+    let profitVol = 0;
+    profile.bins.forEach((b) => {
+      const mid = (b.low + b.high) / 2;
+      weightedSum += mid * b.volume;
+      totalVol += b.volume;
+      if (mid < currentKrw) profitVol += b.volume;
+    });
+    if (totalVol === 0) return null;
+    const realizedPriceApprox = weightedSum / totalVol;
+    const soprApprox = currentKrw / realizedPriceApprox;
+    const profitSupplyPct = (profitVol / totalVol) * 100;
+    return { realizedPriceApprox, soprApprox, profitSupplyPct };
+  }, [profile, currentKrw]);
+
   return (
     <section style={styles.newsCard}>
       <div style={styles.newsHeader}>
@@ -1539,10 +1558,50 @@ function XrpKrwVolumeProfilePanel() {
 
       {loading && !profile && <div style={styles.newsEmpty}>매물대 계산 중…</div>}
 
+      {krwSoprMetrics && (
+        <div style={styles.posGrid}>
+          <div>
+            <div style={styles.posLabel}>근사 SOPR (원화·최대 1000일)</div>
+            <div
+              style={{
+                ...styles.posValue,
+                color: krwSoprMetrics.soprApprox >= 1 ? "#6FCB9F" : "#E2604F",
+              }}
+            >
+              {krwSoprMetrics.soprApprox.toFixed(3)}
+            </div>
+            <div style={styles.posSub}>
+              {krwSoprMetrics.soprApprox >= 1 ? "평균적으로 수익권" : "평균적으로 손실권"}
+            </div>
+          </div>
+          <div>
+            <div style={styles.posLabel}>근사 실현가격</div>
+            <div style={styles.posValue}>{fmtKrw(krwSoprMetrics.realizedPriceApprox)}</div>
+            <div style={styles.posSub}>₩1,000~₩5,000 구간 가중평균</div>
+          </div>
+          <div style={{ gridColumn: "1 / -1" }}>
+            <div style={styles.posLabel}>수익권 물량 비율(근사)</div>
+            <div style={styles.splitBar}>
+              <div style={{ ...styles.splitBarLong, width: `${krwSoprMetrics.profitSupplyPct.toFixed(1)}%` }} />
+            </div>
+            <div style={styles.posSplitRow}>
+              <span style={{ color: "#6FCB9F" }}>수익권 {krwSoprMetrics.profitSupplyPct.toFixed(1)}%</span>
+              <span style={{ color: "#E2604F" }}>
+                손실권 {(100 - krwSoprMetrics.profitSupplyPct).toFixed(1)}%
+              </span>
+            </div>
+          </div>
+          <div style={{ gridColumn: "1 / -1", ...styles.posNote }}>
+            ₩1,000~₩5,000 구간 안의 거래만으로 계산한 근사치입니다. 이 구간을 벗어난 과거 거래(예: 그 이하
+            가격대)는 포함되지 않아 실제 전체 보유자 손익과는 차이가 있을 수 있습니다.
+          </div>
+        </div>
+      )}
+
       {profile && (
         <>
           {currentKrw != null && (
-            <div style={{ ...styles.newsTimestamp, marginBottom: 8 }}>
+            <div style={{ ...styles.newsTimestamp, marginBottom: 8, marginTop: krwSoprMetrics ? 14 : 0 }}>
               현재가 {fmtKrw(currentKrw)}
               {(currentKrw < RANGE_MIN || currentKrw > RANGE_MAX) && " (지정 구간 밖에 있습니다)"}
             </div>
