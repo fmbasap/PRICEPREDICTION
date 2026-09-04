@@ -315,18 +315,58 @@ export default function CryptoTrendDashboard() {
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  const fetchAssetOnce = useCallback(async (key, tf) => {
+  const fetchFromCoinGecko = useCallback(async (key, tf) => {
     const meta = ASSETS[key];
     const tfConf = TIMEFRAMES[tf];
 
     const intervalParam = tf === "daily" ? "&interval=daily" : "";
     const url = `https://api.coingecko.com/api/v3/coins/${meta.id}/market_chart?vs_currency=usd&days=${tfConf.days}${intervalParam}`;
-    const res = await fetch(url);
-    if (res.status === 429) throw new Error("RATE_LIMIT");
-    if (!res.ok) throw new Error(`데이터를 불러오지 못했습니다 (${res.status})`);
-    const json = await res.json();
-    return json.prices;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000); // 8초 넘으면 포기하고 대체 소스로
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+      if (res.status === 429) throw new Error("RATE_LIMIT");
+      if (!res.ok) throw new Error(`CoinGecko 오류 (${res.status})`);
+      const json = await res.json();
+      if (!json.prices || json.prices.length === 0) throw new Error("CoinGecko 데이터 없음");
+      return json.prices;
+    } finally {
+      clearTimeout(timeoutId);
+    }
   }, []);
+
+  // CoinGecko가 막혀도(사파리 프라이빗 릴레이, 광고차단 확장, 일시적 차단 등) 서비스가 죽지 않도록
+  // Binance 공개 캔들 데이터로 대체 조회
+  const fetchFromBinance = useCallback(async (key, tf) => {
+    const meta = ASSETS[key];
+    const interval = tf === "daily" ? "1d" : "1h";
+    const limit = tf === "daily" ? 90 : 168; // 시간별=7일치(24*7), 일별=90일치
+    const url = `https://api.binance.com/api/v3/klines?symbol=${meta.futuresSymbol}&interval=${interval}&limit=${limit}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Binance 오류 (${res.status})`);
+    const candles = await res.json();
+    if (!candles.length) throw new Error("Binance 데이터 없음");
+    // CoinGecko의 [[timestamp, price], ...] 형식으로 맞춰서 반환 (종가 기준)
+    return candles.map((c) => [c[0], parseFloat(c[4])]);
+  }, []);
+
+  const fetchAssetOnce = useCallback(
+    async (key, tf) => {
+      try {
+        return await fetchFromCoinGecko(key, tf);
+      } catch (e) {
+        if (e.message === "RATE_LIMIT") throw e; // 429는 기존 재시도 로직에서 처리
+        // 그 외 실패(네트워크 차단, 타임아웃 등)는 바로 Binance로 대체
+        try {
+          return await fetchFromBinance(key, tf);
+        } catch {
+          throw e; // 둘 다 실패하면 원래(CoinGecko) 에러를 보여줌
+        }
+      }
+    },
+    [fetchFromCoinGecko, fetchFromBinance]
+  );
 
   // 429(요청 과다)일 때는 잠시 대기 후 최대 2회 재시도
   const fetchAsset = useCallback(
