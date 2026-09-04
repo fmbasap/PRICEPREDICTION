@@ -2051,10 +2051,17 @@ function NewsPanel({ assetKey }) {
               {news.headlines.map((h, i) => (
                 <li key={i} style={styles.newsListItem}>
                   <span style={styles.newsListDot}>·</span>
-                  <span>
-                    {h.title}
-                    {h.source && <span style={styles.newsSource}> — {h.source}</span>}
-                  </span>
+                  {h.url ? (
+                    <a href={h.url} target="_blank" rel="noopener noreferrer" style={styles.newsLink}>
+                      {h.title}
+                      {h.source && <span style={styles.newsSource}> — {h.source}</span>}
+                    </a>
+                  ) : (
+                    <span>
+                      {h.title}
+                      {h.source && <span style={styles.newsSource}> — {h.source}</span>}
+                    </span>
+                  )}
                 </li>
               ))}
             </ul>
@@ -2455,6 +2462,12 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     gap: 6,
+  },
+  newsLink: {
+    color: "#C7CCC8",
+    textDecoration: "underline",
+    textDecorationColor: "#5B6660",
+    textUnderlineOffset: 2,
   },
   newsListItem: {
     display: "flex",
