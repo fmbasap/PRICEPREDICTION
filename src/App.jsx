@@ -15,10 +15,6 @@ import { supabase, supabaseDebugInfo } from "./supabaseClient";
 const ASSETS = {
   FLR: { id: "flare-networks", label: "Flare", ticker: "FLR", accent: "#E8A33D", currency: "usd", futuresSymbol: "FLRUSDT" },
   XRP: { id: "ripple", label: "XRP", ticker: "XRP", accent: "#4FD1C5", currency: "usd", futuresSymbol: "XRPUSDT" },
-  BTC: { id: "bitcoin", label: "Bitcoin", ticker: "BTC", accent: "#F7931A", currency: "usd", futuresSymbol: "BTCUSDT" },
-  SOL: { id: "solana", label: "Solana", ticker: "SOL", accent: "#9945FF", currency: "usd", futuresSymbol: "SOLUSDT" },
-  LINK: { id: "chainlink", label: "Chainlink", ticker: "LINK", accent: "#2A5ADA", currency: "usd", futuresSymbol: "LINKUSDT" },
-  UNI: { id: "uniswap", label: "Uniswap", ticker: "UNI", accent: "#FF007A", currency: "usd", futuresSymbol: "UNIUSDT" },
 };
 
 // ---- 시나리오 대결: 김광석 교수(금리인하) vs 현재 컨센서스(금리인상 66%) ----
@@ -2643,10 +2639,6 @@ function GarlinghouseTimelinePanel() {
 const PREDICTION_MARKET_QUERY = {
   XRP: "XRP",
   FLR: "Flare",
-  BTC: "Bitcoin",
-  SOL: "Solana",
-  LINK: "Chainlink",
-  UNI: "Uniswap",
 };
 
 function PredictionMarketPanel({ assetKey }) {
@@ -2806,15 +2798,24 @@ function NewsPanel({ assetKey }) {
   const fetchNews = async () => {
     setLoading(true);
     setError(null);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
     try {
-      const response = await fetch(`/api/news?asset=${encodeURIComponent(assetKey)}`);
+      const response = await fetch(`/api/news?asset=${encodeURIComponent(assetKey)}`, {
+        signal: controller.signal,
+      });
       const parsed = await response.json();
       if (!response.ok || parsed.error) throw new Error(parsed.error || `뉴스 조회에 실패했습니다 (${response.status})`);
       setNews(parsed);
       setFetchedAt(new Date());
     } catch (e) {
-      setError(e.message || "뉴스를 불러오지 못했습니다");
+      if (e.name === "AbortError") {
+        setError("응답이 너무 오래 걸려서 중단했습니다. 다시 시도해주세요.");
+      } else {
+        setError(e.message || "뉴스를 불러오지 못했습니다");
+      }
     } finally {
+      clearTimeout(timeoutId);
       setLoading(false);
     }
   };
