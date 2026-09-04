@@ -1738,8 +1738,8 @@ function KrwVolumeProfilePanel({ coinId, futuresSymbol, label, accent }) {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [krwRate, setKrwRate] = useState(null);
-  const [currentKrw, setCurrentKrw] = useState(null);
+  const [currentPriceUsd, setCurrentPriceUsd] = useState(null);
+  const [dataSource, setDataSource] = useState(null);
 
   const BIN_COUNT = 20;
 
@@ -1747,36 +1747,10 @@ function KrwVolumeProfilePanel({ coinId, futuresSymbol, label, accent }) {
     setLoading(true);
     setError(null);
     try {
-      // 1) USD/KRW 환율 확보 (해당 코인의 usd/krw 가격을 동시에 받아 그 비율로 환율 역산)
-      let rateJson;
-      try {
-        const rateController = new AbortController();
-        const rateTimeout = setTimeout(() => rateController.abort(), 8000);
-        try {
-          const rateRes = await fetch(
-            `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd,krw`,
-            { signal: rateController.signal }
-          );
-          if (!rateRes.ok) throw new Error(`환율 조회 실패 (${rateRes.status})`);
-          rateJson = await rateRes.json();
-        } finally {
-          clearTimeout(rateTimeout);
-        }
-      } catch (e) {
-        throw new Error(`[환율 조회 단계] ${e.name === "AbortError" ? "응답 시간 초과" : e.message}`);
-      }
-
-      const usdPrice = rateJson?.[coinId]?.usd;
-      const krwPrice = rateJson?.[coinId]?.krw;
-      if (!usdPrice || !krwPrice) throw new Error("[환율 조회 단계] 환율 데이터를 가져오지 못했습니다");
-      const rate = krwPrice / usdPrice; // USD/KRW 환율
-      setKrwRate(rate);
-      setCurrentKrw(krwPrice);
-
-      // 2) Binance 일봉으로 최대한 먼 과거까지 (한 번 호출로 최대 1000일 ≈ 2.7년)
+      // 1) Binance 일봉으로 최대한 먼 과거까지 (한 번 호출로 최대 1000일 ≈ 2.7년)
       // 다른 카드들도 동시에 Binance를 호출해서 순간적으로 막히는 경우가 있어,
       // 약간의 지연 + 재시도를 넣어서 완화합니다.
-      let candles;
+      let candles = null;
       let binLastErr;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -1802,17 +1776,50 @@ function KrwVolumeProfilePanel({ coinId, futuresSymbol, label, accent }) {
           binLastErr = e;
         }
       }
-      if (binLastErr) {
-        throw new Error(`[Binance 조회 단계] ${binLastErr.name === "AbortError" ? "응답 시간 초과" : binLastErr.message} (3회 재시도 후 실패)`);
+
+      // Binance에 없는 자산(FLR 등 선물/현물 미상장)이거나 계속 실패하면 CoinGecko 일봉으로 대체
+      let points;
+      let source = "binance";
+      let latestPrice = null;
+      if (candles) {
+        points = candles.map((c) => ({
+          price: (parseFloat(c[2]) + parseFloat(c[3]) + parseFloat(c[4])) / 3,
+          volume: parseFloat(c[7]),
+        }));
+        latestPrice = parseFloat(candles[candles.length - 1][4]); // 마지막 캔들 종가
+      } else {
+        try {
+          const cgController = new AbortController();
+          const cgTimeout = setTimeout(() => cgController.abort(), 10000);
+          let cgJson;
+          try {
+            const cgUrl = `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=365&interval=daily`;
+            const cgRes = await fetch(cgUrl, { signal: cgController.signal });
+            if (!cgRes.ok) throw new Error(`CoinGecko 조회 실패 (${cgRes.status})`);
+            cgJson = await cgRes.json();
+          } finally {
+            clearTimeout(cgTimeout);
+          }
+          const cgPrices = cgJson.prices || [];
+          const cgVolumes = cgJson.total_volumes || [];
+          if (cgPrices.length === 0) throw new Error("데이터가 없습니다");
+          const n = Math.min(cgPrices.length, cgVolumes.length);
+          points = [];
+          for (let i = 0; i < n; i++) {
+            points.push({ price: cgPrices[i][1], volume: cgVolumes[i][1] || 0 });
+          }
+          latestPrice = cgPrices[cgPrices.length - 1][1];
+          source = "coingecko";
+        } catch (e2) {
+          throw new Error(
+            `[Binance 조회 단계] ${binLastErr?.message || "실패"} → [CoinGecko 대체도 실패] ${e2.message}`
+          );
+        }
       }
+      setDataSource(source);
+      setCurrentPriceUsd(latestPrice);
 
-      // 3) USD → KRW 환산 (범위는 실제 데이터의 최소~최대로 자동 설정, 자산마다 가격대가 달라서 고정 구간 대신 자동 계산)
-      const points = candles.map((c) => ({
-        priceKrw: ((parseFloat(c[2]) + parseFloat(c[3]) + parseFloat(c[4])) / 3) * rate,
-        volumeKrw: parseFloat(c[7]) * rate,
-      }));
-
-      const priceValues = points.map((p) => p.priceKrw);
+      const priceValues = points.map((p) => p.price);
       const minPrice = Math.min(...priceValues);
       const maxPrice = Math.max(...priceValues);
       const binSize = (maxPrice - minPrice) / BIN_COUNT || 1;
@@ -1823,11 +1830,11 @@ function KrwVolumeProfilePanel({ coinId, futuresSymbol, label, accent }) {
         volume: 0,
       }));
 
-      points.forEach(({ priceKrw, volumeKrw }) => {
-        let idx = Math.floor((priceKrw - minPrice) / binSize);
+      points.forEach(({ price, volume }) => {
+        let idx = Math.floor((price - minPrice) / binSize);
         if (idx >= BIN_COUNT) idx = BIN_COUNT - 1;
         if (idx < 0) idx = 0;
-        bins[idx].volume += volumeKrw;
+        bins[idx].volume += volume;
       });
 
       const maxVol = Math.max(...bins.map((b) => b.volume));
@@ -1847,15 +1854,9 @@ function KrwVolumeProfilePanel({ coinId, futuresSymbol, label, accent }) {
     fetchProfile();
   }, [fetchProfile]);
 
-  const fmtKrwSmart = (v) => {
-    // FLR처럼 원화 소액인 자산은 소수점까지, XRP처럼 큰 자산은 정수로
-    if (v < 100) return `₩${v.toFixed(2)}`;
-    return `₩${Math.round(v).toLocaleString("ko-KR")}`;
-  };
-
-  // 원화 매물대(자동 범위) 기반 SOPR 근사치
-  const krwSoprMetrics = useMemo(() => {
-    if (!profile || currentKrw == null) return null;
+  // 매물대(자동 범위) 기반 SOPR 근사치
+  const soprMetrics = useMemo(() => {
+    if (!profile || currentPriceUsd == null) return null;
     let weightedSum = 0;
     let totalVol = 0;
     let profitVol = 0;
@@ -1863,21 +1864,26 @@ function KrwVolumeProfilePanel({ coinId, futuresSymbol, label, accent }) {
       const mid = (b.low + b.high) / 2;
       weightedSum += mid * b.volume;
       totalVol += b.volume;
-      if (mid < currentKrw) profitVol += b.volume;
+      if (mid < currentPriceUsd) profitVol += b.volume;
     });
     if (totalVol === 0) return null;
     const realizedPriceApprox = weightedSum / totalVol;
-    const soprApprox = currentKrw / realizedPriceApprox;
+    const soprApprox = currentPriceUsd / realizedPriceApprox;
     const profitSupplyPct = (profitVol / totalVol) * 100;
     return { realizedPriceApprox, soprApprox, profitSupplyPct };
-  }, [profile, currentKrw]);
+  }, [profile, currentPriceUsd]);
 
   return (
     <section style={styles.newsCard}>
       <div style={styles.newsHeader}>
         <div style={styles.tableTitle}>
-          {label} 원화 매물대 (자동 범위, 최대 1000일)
-          {krwRate && <span style={styles.newsTimestamp}> · 환율 ₩{krwRate.toFixed(0)}/$</span>}
+          {label} 매물대 (자동 범위{dataSource === "coingecko" ? ", 최대 365일" : ", 최대 1000일"})
+          {dataSource && (
+            <span style={styles.newsTimestamp}>
+              {" "}
+              · {dataSource === "binance" ? "Binance 일봉" : "CoinGecko 일봉(대체)"}
+            </span>
+          )}
         </div>
         <button onClick={fetchProfile} style={styles.newsBtn} disabled={loading}>
           <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
@@ -1894,36 +1900,36 @@ function KrwVolumeProfilePanel({ coinId, futuresSymbol, label, accent }) {
 
       {loading && !profile && <div style={styles.newsEmpty}>매물대 계산 중…</div>}
 
-      {krwSoprMetrics && (
+      {soprMetrics && (
         <div style={styles.posGrid}>
           <div>
-            <div style={styles.posLabel}>근사 SOPR (원화·최대 1000일)</div>
+            <div style={styles.posLabel}>근사 SOPR (최대 1000일)</div>
             <div
               style={{
                 ...styles.posValue,
-                color: krwSoprMetrics.soprApprox >= 1 ? "#6FCB9F" : "#E2604F",
+                color: soprMetrics.soprApprox >= 1 ? "#6FCB9F" : "#E2604F",
               }}
             >
-              {krwSoprMetrics.soprApprox.toFixed(3)}
+              {soprMetrics.soprApprox.toFixed(3)}
             </div>
             <div style={styles.posSub}>
-              {krwSoprMetrics.soprApprox >= 1 ? "평균적으로 수익권" : "평균적으로 손실권"}
+              {soprMetrics.soprApprox >= 1 ? "평균적으로 수익권" : "평균적으로 손실권"}
             </div>
           </div>
           <div>
             <div style={styles.posLabel}>근사 실현가격</div>
-            <div style={styles.posValue}>{fmtKrwSmart(krwSoprMetrics.realizedPriceApprox)}</div>
-            <div style={styles.posSub}>90~1000일 데이터 범위 가중평균</div>
+            <div style={styles.posValue}>{fmtPrice(soprMetrics.realizedPriceApprox)}</div>
+            <div style={styles.posSub}>조회 기간 데이터 범위 가중평균</div>
           </div>
           <div style={{ gridColumn: "1 / -1" }}>
             <div style={styles.posLabel}>수익권 물량 비율(근사)</div>
             <div style={styles.splitBar}>
-              <div style={{ ...styles.splitBarLong, width: `${krwSoprMetrics.profitSupplyPct.toFixed(1)}%` }} />
+              <div style={{ ...styles.splitBarLong, width: `${soprMetrics.profitSupplyPct.toFixed(1)}%` }} />
             </div>
             <div style={styles.posSplitRow}>
-              <span style={{ color: "#6FCB9F" }}>수익권 {krwSoprMetrics.profitSupplyPct.toFixed(1)}%</span>
+              <span style={{ color: "#6FCB9F" }}>수익권 {soprMetrics.profitSupplyPct.toFixed(1)}%</span>
               <span style={{ color: "#E2604F" }}>
-                손실권 {(100 - krwSoprMetrics.profitSupplyPct).toFixed(1)}%
+                손실권 {(100 - soprMetrics.profitSupplyPct).toFixed(1)}%
               </span>
             </div>
           </div>
@@ -1936,19 +1942,19 @@ function KrwVolumeProfilePanel({ coinId, futuresSymbol, label, accent }) {
 
       {profile && (
         <>
-          {currentKrw != null && (
-            <div style={{ ...styles.newsTimestamp, marginBottom: 8, marginTop: krwSoprMetrics ? 14 : 0 }}>
-              현재가 {fmtKrwSmart(currentKrw)}
+          {currentPriceUsd != null && (
+            <div style={{ ...styles.newsTimestamp, marginBottom: 8, marginTop: soprMetrics ? 14 : 0 }}>
+              현재가 {fmtPrice(currentPriceUsd)}
             </div>
           )}
           <div style={styles.vpList}>
             {profile.bins.map((bin, i) => {
               const isPoc = bin.low === profile.pocLow;
-              const isCurrent = currentKrw != null && currentKrw >= bin.low && currentKrw < bin.high;
+              const isCurrent = currentPriceUsd != null && currentPriceUsd >= bin.low && currentPriceUsd < bin.high;
               const widthPct = profile.maxVol > 0 ? (bin.volume / profile.maxVol) * 100 : 0;
               return (
                 <div key={i} style={styles.vpRow}>
-                  <span style={styles.vpPriceLabel}>{fmtKrwSmart((bin.low + bin.high) / 2)}</span>
+                  <span style={styles.vpPriceLabel}>{fmtPrice((bin.low + bin.high) / 2)}</span>
                   <div style={styles.vpBarTrack}>
                     <div
                       style={{
@@ -1965,10 +1971,9 @@ function KrwVolumeProfilePanel({ coinId, futuresSymbol, label, accent }) {
             })}
           </div>
           <div style={{ ...styles.posNote, marginTop: 10 }}>
-            Binance 상장 이후 최대 약 1,000일(일봉 기준)치 거래대금을 <strong>현재 환율</strong>로 일괄
-            환산해서, 실제 가격이 오갔던 구간({fmtKrwSmart(profile.minPrice)}~{fmtKrwSmart(profile.maxPrice)})을
-            20개 칸으로 나눈 매물대입니다. 그 기간 동안 환율도 변동했기 때문에 당시 실제 원화 가격과는
-            다소 오차가 있을 수 있습니다.
+            Binance 상장 이후 최대 약 1,000일(일봉 기준)치 거래대금을, 실제 가격이 오갔던 구간(
+            {fmtPrice(profile.minPrice)}~{fmtPrice(profile.maxPrice)})으로 20개 칸에 나눈 매물대입니다.
+            환율 변환 없이 달러(USD) 기준 그대로입니다.
           </div>
         </>
       )}
