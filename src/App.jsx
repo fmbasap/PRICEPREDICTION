@@ -2037,14 +2037,29 @@ function NewsPanel({ assetKey }) {
       )}
 
       {news && (
-        <div style={styles.gaugeRow}>
-          <div style={{ ...styles.gaugeScore, color: scoreColor(news.score) }}>{news.score}</div>
-          {fetchedAt && (
-            <span style={styles.newsTimestamp}>
-              {fetchedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 조회
-            </span>
+        <>
+          <div style={styles.gaugeRow}>
+            <div style={{ ...styles.gaugeScore, color: scoreColor(news.score) }}>{news.score}</div>
+            {fetchedAt && (
+              <span style={styles.newsTimestamp}>
+                {fetchedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 조회
+              </span>
+            )}
+          </div>
+          {news.headlines && news.headlines.length > 0 && (
+            <ul style={styles.newsList}>
+              {news.headlines.map((h, i) => (
+                <li key={i} style={styles.newsListItem}>
+                  <span style={styles.newsListDot}>·</span>
+                  <span>
+                    {h.title}
+                    {h.source && <span style={styles.newsSource}> — {h.source}</span>}
+                  </span>
+                </li>
+              ))}
+            </ul>
           )}
-        </div>
+        </>
       )}
     </section>
   );
@@ -2432,6 +2447,29 @@ const styles = {
     textAlign: "center",
     gap: 8,
     padding: "16px 0",
+  },
+  newsList: {
+    listStyle: "none",
+    margin: "10px 0 0",
+    padding: 0,
+    display: "flex",
+    flexDirection: "column",
+    gap: 6,
+  },
+  newsListItem: {
+    display: "flex",
+    gap: 6,
+    fontSize: 12,
+    lineHeight: 1.5,
+    color: "#C7CCC8",
+  },
+  newsListDot: {
+    color: "#5B6660",
+  },
+  newsSource: {
+    color: "#5B6660",
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 11,
   },
   newsCard: {
     background: "#171D1A",
