@@ -649,6 +649,14 @@ export default function CryptoTrendDashboard() {
 
             <PositioningPanel key={`pos-${asset}`} symbol={meta.futuresSymbol} accent={meta.accent} />
 
+            <VolumeProfilePanel
+              key={`vp-${asset}`}
+              coinId={meta.id}
+              futuresSymbol={meta.futuresSymbol}
+              accent={meta.accent}
+              currentPrice={analysis.currentPrice}
+            />
+
             {hasAccess("silver") ? (
               <LiquidationPanel key={`liq-${asset}`} symbol={meta.futuresSymbol} accent={meta.accent} />
             ) : (
@@ -1430,6 +1438,167 @@ function LiquidationPanel({ symbol, accent }) {
         anyLive && (
           <div style={{ ...styles.posNote, marginTop: 8 }}>아직 감지된 청산이 없습니다.</div>
         )
+      )}
+    </section>
+  );
+}
+
+function VolumeProfilePanel({ coinId, futuresSymbol, accent, currentPrice }) {
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [source, setSource] = useState(null); // "binance" | "coingecko"
+
+  // Binance 공개 API로 15분봉 90일치를 페이지네이션해서 가져옴 (분당 요청 제한 안에서 순차 호출)
+  const fetchBinanceKlines = useCallback(async (symbol) => {
+    const intervalMs = 15 * 60 * 1000;
+    const totalCandles = 90 * 24 * 4; // 90일 * 하루 96개(15분 단위)
+    let candles = [];
+    let endTime = Date.now();
+
+    while (candles.length < totalCandles) {
+      const limit = Math.min(1000, totalCandles - candles.length);
+      const url = `https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=15m&endTime=${endTime}&limit=${limit}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Binance 조회 실패 (${res.status})`);
+      const data = await res.json();
+      if (!data.length) break;
+      candles = data.concat(candles);
+      endTime = data[0][0] - intervalMs;
+      if (data.length < limit) break;
+    }
+    if (candles.length === 0) throw new Error("Binance 데이터가 없습니다");
+    // [openTime, open, high, low, close, volume, closeTime, quoteVolume, ...]
+    return candles.map((c) => ({
+      price: (parseFloat(c[2]) + parseFloat(c[3]) + parseFloat(c[4])) / 3, // 고가+저가+종가 평균(대표가)
+      volume: parseFloat(c[7]), // 달러(USDT) 환산 거래대금
+    }));
+  }, []);
+
+  const fetchCoinGeckoDaily = useCallback(async () => {
+    const url = `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=90&interval=daily`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`CoinGecko 조회 실패 (${res.status})`);
+    const json = await res.json();
+    const prices = json.prices || [];
+    const volumes = json.total_volumes || [];
+    if (prices.length === 0) throw new Error("데이터가 부족합니다");
+    const n = Math.min(prices.length, volumes.length);
+    const points = [];
+    for (let i = 0; i < n; i++) {
+      points.push({ price: prices[i][1], volume: volumes[i][1] || 0 });
+    }
+    return points;
+  }, [coinId]);
+
+  const buildProfile = (points) => {
+    const priceValues = points.map((p) => p.price);
+    const minPrice = Math.min(...priceValues);
+    const maxPrice = Math.max(...priceValues);
+    const binCount = 18;
+    const binSize = (maxPrice - minPrice) / binCount || 1;
+
+    const bins = Array.from({ length: binCount }, (_, i) => ({
+      low: minPrice + i * binSize,
+      high: minPrice + (i + 1) * binSize,
+      volume: 0,
+    }));
+
+    points.forEach(({ price, volume }) => {
+      let idx = Math.floor((price - minPrice) / binSize);
+      if (idx >= binCount) idx = binCount - 1;
+      if (idx < 0) idx = 0;
+      bins[idx].volume += volume;
+    });
+
+    const maxVol = Math.max(...bins.map((b) => b.volume));
+    const pocIdx = bins.findIndex((b) => b.volume === maxVol);
+    return { bins: bins.reverse(), maxVol, pocLow: bins[pocIdx]?.low, pocHigh: bins[pocIdx]?.high };
+  };
+
+  const fetchProfile = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      let points;
+      try {
+        points = await fetchBinanceKlines(futuresSymbol);
+        setSource("binance");
+      } catch {
+        // Binance에 없는 종목(선물 미상장 등)이면 CoinGecko 일봉으로 자동 대체
+        points = await fetchCoinGeckoDaily();
+        setSource("coingecko");
+      }
+      setProfile(buildProfile(points));
+    } catch (e) {
+      setError(e.message || "매물대 데이터를 불러오지 못했습니다");
+    } finally {
+      setLoading(false);
+    }
+  }, [futuresSymbol, fetchBinanceKlines, fetchCoinGeckoDaily]);
+
+  useEffect(() => {
+    fetchProfile();
+  }, [fetchProfile]);
+
+  return (
+    <section style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>
+          매물대 (최근 90일 거래량 분포)
+          {source && (
+            <span style={styles.newsTimestamp}>
+              {" "}
+              {source === "binance" ? "· Binance 15분봉" : "· CoinGecko 일봉(대체)"}
+            </span>
+          )}
+        </div>
+        <button onClick={fetchProfile} style={styles.newsBtn} disabled={loading}>
+          <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
+          갱신
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ ...styles.errorBox, marginBottom: 0 }}>
+          <AlertTriangle size={14} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {loading && !profile && <div style={styles.newsEmpty}>매물대 계산 중…</div>}
+
+      {profile && (
+        <>
+          <div style={styles.vpList}>
+            {profile.bins.map((bin, i) => {
+              const isPoc = bin.low === profile.pocLow;
+              const isCurrent = currentPrice != null && currentPrice >= bin.low && currentPrice < bin.high;
+              const widthPct = profile.maxVol > 0 ? (bin.volume / profile.maxVol) * 100 : 0;
+              return (
+                <div key={i} style={styles.vpRow}>
+                  <span style={styles.vpPriceLabel}>{fmtPrice((bin.low + bin.high) / 2)}</span>
+                  <div style={styles.vpBarTrack}>
+                    <div
+                      style={{
+                        ...styles.vpBarFill,
+                        width: `${Math.max(widthPct, 2)}%`,
+                        background: isPoc ? "#E8A33D" : isCurrent ? accent : "#5B9BD5",
+                      }}
+                    />
+                  </div>
+                  {isCurrent && <span style={styles.vpCurrentTag}>현재가</span>}
+                  {isPoc && !isCurrent && <span style={{ ...styles.vpCurrentTag, color: "#E8A33D" }}>POC</span>}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ ...styles.posNote, marginTop: 10 }}>
+            막대가 길수록 그 가격대에서 최근 90일간 거래량이 많이 몰렸다는 뜻입니다. 주황색(POC)은 가장
+            거래가 몰린 가격대로, 심리적 지지/저항으로 작동하는 경우가 많습니다. 다만 온체인 실제 매수단가
+            추적은 아니고, 가격·거래량 데이터로 근사한 참고 지표입니다.
+          </div>
+        </>
       )}
     </section>
   );
@@ -2483,6 +2652,42 @@ const styles = {
     color: "#5B6660",
     fontFamily: "IBM Plex Mono, monospace",
     fontSize: 11,
+  },
+  vpList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 3,
+  },
+  vpRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    height: 16,
+  },
+  vpPriceLabel: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 9,
+    color: "#5B6660",
+    width: 64,
+    flexShrink: 0,
+    textAlign: "right",
+  },
+  vpBarTrack: {
+    flex: 1,
+    height: 10,
+    background: "#0E1210",
+    borderRadius: 2,
+    overflow: "hidden",
+  },
+  vpBarFill: {
+    height: "100%",
+    borderRadius: 2,
+  },
+  vpCurrentTag: {
+    fontFamily: "IBM Plex Mono, monospace",
+    fontSize: 8,
+    color: "#EDEAE3",
+    flexShrink: 0,
   },
   newsCard: {
     background: "#171D1A",
