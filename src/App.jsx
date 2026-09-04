@@ -204,6 +204,28 @@ function linearRegressionProjection(points, forwardSteps) {
   return { projected, slope };
 }
 
+// 홀트 이중지수평활(Holt's linear trend method) - 단순 선형회귀보다 최근 변곡점을 더 빨리 반영함.
+// alpha: 값(레벨) 평활 계수, beta: 추세 평활 계수 (둘 다 0~1, 클수록 최근 데이터에 민감)
+function holtForecast(points, forwardSteps, alpha = 0.4, beta = 0.2) {
+  const n = points.length;
+  if (n < 2) return { projected: [], finalLevel: null, finalTrend: null };
+
+  let level = points[0];
+  let trend = points[1] - points[0];
+
+  for (let i = 1; i < n; i++) {
+    const prevLevel = level;
+    level = alpha * points[i] + (1 - alpha) * (level + trend);
+    trend = beta * (level - prevLevel) + (1 - beta) * trend;
+  }
+
+  const projected = [];
+  for (let h = 1; h <= forwardSteps; h++) {
+    projected.push(level + h * trend);
+  }
+  return { projected, finalLevel: level, finalTrend: trend };
+}
+
 function fmtPrice(v) {
   if (v == null) return "-";
   if (v < 0.01) return `$${v.toFixed(6)}`;
@@ -440,15 +462,18 @@ export default function CryptoTrendDashboard() {
       smaFast: smaFast[i],
       smaSlow: smaSlow[i],
       projection: null,
+      holtProjection: null,
     }));
 
     const recentWindow = prices.slice(-tfConf.regressionWindow);
     const { projected, slope } = linearRegressionProjection(recentWindow, tfConf.forwardUnits);
+    const { projected: holtProjected, finalTrend: holtTrend } = holtForecast(recentWindow, tfConf.forwardUnits);
     const lastTs = timestamps[timestamps.length - 1];
 
     chartData[chartData.length - 1] = {
       ...chartData[chartData.length - 1],
       projection: chartData[chartData.length - 1].price,
+      holtProjection: chartData[chartData.length - 1].price,
     };
 
     projected.forEach((val, idx) => {
@@ -460,6 +485,7 @@ export default function CryptoTrendDashboard() {
         smaFast: null,
         smaSlow: null,
         projection: val,
+        holtProjection: holtProjected[idx] ?? null,
       });
     });
 
@@ -505,6 +531,11 @@ export default function CryptoTrendDashboard() {
         ? ((projected[projected.length - 1] - currentPrice) / currentPrice) * 100
         : 0;
 
+    const holtProjectedChangePct =
+      currentPrice && holtProjected.length
+        ? ((holtProjected[holtProjected.length - 1] - currentPrice) / currentPrice) * 100
+        : 0;
+
     return {
       chartData,
       currentPrice,
@@ -519,6 +550,8 @@ export default function CryptoTrendDashboard() {
       rsiStatus,
       slope,
       projectedChangePct,
+      holtTrend,
+      holtProjectedChangePct,
     };
   }, [cache, asset, timeframe]);
 
@@ -657,6 +690,7 @@ export default function CryptoTrendDashboard() {
                 <LegendItem color="#5B9BD5" label={tfConf.fastLabel} dashed />
                 <LegendItem color="#B388EB" label={tfConf.slowLabel} dashed />
                 <LegendItem color="#EDEAE3" label={`추세 연장선(${tfConf.forwardLabel})`} dotted />
+                <LegendItem color="#F4A6C6" label="홀트 예측선" dotted />
               </div>
               <ResponsiveContainer width="100%" height={280}>
                 <ComposedChart data={analysis.chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
@@ -690,6 +724,7 @@ export default function CryptoTrendDashboard() {
                   <Line type="monotone" dataKey="smaFast" stroke="#5B9BD5" strokeWidth={1.25} dot={false} strokeDasharray="4 3" connectNulls />
                   <Line type="monotone" dataKey="price" stroke={meta.accent} strokeWidth={2} dot={false} connectNulls />
                   <Line type="monotone" dataKey="projection" stroke="#EDEAE3" strokeWidth={1.5} strokeDasharray="1 3" dot={false} connectNulls />
+                  <Line type="monotone" dataKey="holtProjection" stroke="#F4A6C6" strokeWidth={1.5} strokeDasharray="1 3" dot={false} connectNulls />
                 </ComposedChart>
               </ResponsiveContainer>
             </section>
@@ -750,6 +785,12 @@ export default function CryptoTrendDashboard() {
                 value={`${analysis.projectedChangePct >= 0 ? "+" : ""}${analysis.projectedChangePct.toFixed(1)}%`}
                 status={analysis.projectedChangePct >= 0 ? "up" : "down"}
                 sub={`최근 ${tfConf.regressionWindow}개 구간 선형 회귀 기준`}
+              />
+              <SignalCard
+                title={`홀트 예측 (${tfConf.forwardLabel} 후)`}
+                value={`${analysis.holtProjectedChangePct >= 0 ? "+" : ""}${analysis.holtProjectedChangePct.toFixed(1)}%`}
+                status={analysis.holtProjectedChangePct >= 0 ? "up" : "down"}
+                sub="이중지수평활 - 최근 변곡점 민감"
               />
             </section>
 
