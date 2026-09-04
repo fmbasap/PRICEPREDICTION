@@ -48,6 +48,18 @@ const SCENARIOS = {
       "2026-12-15": { BTC: -6, ETH: -8, SOL: -10, XRP: -2 },
     },
   },
+  hold: {
+    label: "동결 + 클래리티법 불발 + 재정정책 유동성",
+    color: "#5B9BD5",
+    checkpoints: {
+      // 9/15 클래리티법 불발(XRP 개별 악재) + 9/16 FOMC 동결(공통, 아직 9/15엔 미반영)
+      "2026-09-15": { BTC: -1, ETH: -1.5, SOL: -2, XRP: -6 },
+      // FOMC 동결 안도 + 재정정책 유동성 서사가 붙기 시작
+      "2026-10-15": { BTC: 5, ETH: 7, SOL: 9, XRP: 8 },
+      "2026-11-15": { BTC: 9, ETH: 13, SOL: 16, XRP: 14 },
+      "2026-12-15": { BTC: 13, ETH: 19, SOL: 23, XRP: 20 },
+    },
+  },
 };
 
 const TIMEFRAMES = {
@@ -659,6 +671,8 @@ export default function CryptoTrendDashboard() {
 
             {asset === "XRP" && <XrpKrwVolumeProfilePanel />}
 
+            {asset === "XRP" && <IndicesPanel />}
+
             {hasAccess("silver") ? (
               <LiquidationPanel key={`liq-${asset}`} symbol={meta.futuresSymbol} accent={meta.accent} />
             ) : (
@@ -681,7 +695,7 @@ export default function CryptoTrendDashboard() {
             {hasAccess("silver") ? (
               <ScenarioBattlePanel />
             ) : (
-              <LockedPanel title="시나리오 대결: 김광석 vs 컨센서스" requiredTier="silver" />
+              <LockedPanel title="시나리오 대결 (3파전)" requiredTier="silver" />
             )}
 
             <footer style={styles.disclaimer}>
@@ -1445,6 +1459,86 @@ function LiquidationPanel({ symbol, accent }) {
   );
 }
 
+function IndicesPanel() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const fetchIndices = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/indices");
+      const json = await res.json();
+      if (!res.ok || json.error) throw new Error(json.error || `조회에 실패했습니다 (${res.status})`);
+      setData(json);
+    } catch (e) {
+      setError(e.message || "지수 데이터를 불러오지 못했습니다");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchIndices();
+  }, []);
+
+  return (
+    <section style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>코스피 · 나스닥</div>
+        <button onClick={fetchIndices} style={styles.newsBtn} disabled={loading}>
+          <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
+          갱신
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ ...styles.errorBox, marginBottom: 0 }}>
+          <AlertTriangle size={14} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {loading && !data && <div style={styles.newsEmpty}>조회 중…</div>}
+
+      {data && (
+        <div style={styles.posGrid}>
+          {data.indices.map((idx) => (
+            <div key={idx.symbol}>
+              <div style={styles.posLabel}>{idx.label}</div>
+              {idx.error ? (
+                <div style={{ ...styles.pmMetaSub, color: "#E2604F" }}>조회 실패: {idx.error}</div>
+              ) : (
+                <>
+                  <div style={styles.posValue}>
+                    {idx.price != null ? idx.price.toLocaleString("ko-KR", { maximumFractionDigits: 2 }) : "-"}
+                  </div>
+                  <div
+                    style={{
+                      ...styles.posSub,
+                      color: idx.changePct == null ? "#8B948E" : idx.changePct >= 0 ? "#6FCB9F" : "#E2604F",
+                    }}
+                  >
+                    {idx.changePct != null
+                      ? `${idx.changePct >= 0 ? "+" : ""}${idx.changePct.toFixed(2)}% (전일 대비)`
+                      : "-"}
+                  </div>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ ...styles.posNote, marginTop: 10 }}>
+        각 거래소 운영시간에만 갱신됩니다 (코스피: 한국 장 시간, 나스닥: 미국 장 시간). 장 마감 후엔 마지막
+        종가가 그대로 유지됩니다. 데이터 출처: Yahoo Finance.
+      </div>
+    </section>
+  );
+}
+
 function XrpKrwVolumeProfilePanel() {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -2111,11 +2205,20 @@ function ScenarioBattlePanel() {
   return (
     <section style={styles.newsCard}>
       <div style={styles.newsHeader}>
-        <div style={styles.tableTitle}>시나리오 대결: 김광석 vs 컨센서스</div>
+        <div style={styles.tableTitle}>시나리오 대결 (3파전)</div>
         <button onClick={evaluate} style={styles.newsBtn} disabled={loading}>
           <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
           평가
         </button>
+      </div>
+
+      <div style={{ ...styles.newsEmpty, marginBottom: 10 }}>
+        {Object.entries(SCENARIOS).map(([key, s], i) => (
+          <span key={key}>
+            {i > 0 && " · "}
+            <span style={{ color: s.color, fontWeight: 600 }}>{s.label}</span>
+          </span>
+        ))}
       </div>
 
       {error && (
@@ -2136,35 +2239,40 @@ function ScenarioBattlePanel() {
           <thead>
             <tr>
               <th style={styles.th}>체크포인트</th>
-              <th style={{ ...styles.th, textAlign: "right", color: SCENARIOS.kim.color }}>김광석 오차</th>
-              <th style={{ ...styles.th, textAlign: "right", color: SCENARIOS.consensus.color }}>컨센서스 오차</th>
+              {Object.entries(SCENARIOS).map(([key, s]) => (
+                <th key={key} style={{ ...styles.th, textAlign: "right", color: s.color }}>
+                  {s.label.split(" ")[0]} 오차
+                </th>
+              ))}
               <th style={{ ...styles.th, textAlign: "right" }}>우세</th>
             </tr>
           </thead>
           <tbody>
             {passedCheckpoints.map((cpDate, i) => {
-              const kimErr = computeErrorForCheckpoint("kim", cpDate);
-              const consErr = computeErrorForCheckpoint("consensus", cpDate);
-              const winner =
-                kimErr == null || consErr == null ? "-" : kimErr < consErr ? "김광석" : "컨센서스";
+              const errors = Object.keys(SCENARIOS).map((key) => ({
+                key,
+                err: computeErrorForCheckpoint(key, cpDate),
+              }));
+              const valid = errors.filter((e) => e.err != null);
+              const winnerEntry =
+                valid.length === 0 ? null : valid.reduce((a, b) => (a.err < b.err ? a : b));
               return (
                 <tr key={cpDate} style={i % 2 === 1 ? styles.trAlt : undefined}>
                   <td style={styles.td}>{cpDate}</td>
-                  <td style={{ ...styles.td, textAlign: "right" }}>
-                    {kimErr != null ? `${kimErr.toFixed(1)}%` : "대기"}
-                  </td>
-                  <td style={{ ...styles.td, textAlign: "right" }}>
-                    {consErr != null ? `${consErr.toFixed(1)}%` : "대기"}
-                  </td>
+                  {errors.map(({ key, err }) => (
+                    <td key={key} style={{ ...styles.td, textAlign: "right" }}>
+                      {err != null ? `${err.toFixed(1)}%` : "대기"}
+                    </td>
+                  ))}
                   <td
                     style={{
                       ...styles.td,
                       textAlign: "right",
-                      color: winner === "김광석" ? SCENARIOS.kim.color : winner === "컨센서스" ? SCENARIOS.consensus.color : "#8B948E",
+                      color: winnerEntry ? SCENARIOS[winnerEntry.key].color : "#8B948E",
                       fontWeight: 600,
                     }}
                   >
-                    {winner}
+                    {winnerEntry ? SCENARIOS[winnerEntry.key].label.split(" ")[0] : "-"}
                   </td>
                 </tr>
               );
