@@ -2849,36 +2849,14 @@ function NewsPanel({ assetKey }) {
       )}
 
       {news && (
-        <>
-          <div style={styles.gaugeRow}>
-            <div style={{ ...styles.gaugeScore, color: scoreColor(news.score) }}>{news.score}</div>
-            {fetchedAt && (
-              <span style={styles.newsTimestamp}>
-                {fetchedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 조회
-              </span>
-            )}
-          </div>
-          {news.headlines && news.headlines.length > 0 && (
-            <ul style={styles.newsList}>
-              {news.headlines.map((h, i) => (
-                <li key={i} style={styles.newsListItem}>
-                  <span style={styles.newsListDot}>·</span>
-                  {h.url ? (
-                    <a href={h.url} target="_blank" rel="noopener noreferrer" style={styles.newsLink}>
-                      {h.title}
-                      {h.source && <span style={styles.newsSource}> — {h.source}</span>}
-                    </a>
-                  ) : (
-                    <span>
-                      {h.title}
-                      {h.source && <span style={styles.newsSource}> — {h.source}</span>}
-                    </span>
-                  )}
-                </li>
-              ))}
-            </ul>
+        <div style={styles.gaugeRow}>
+          <div style={{ ...styles.gaugeScore, color: scoreColor(news.score) }}>{news.score}</div>
+          {fetchedAt && (
+            <span style={styles.newsTimestamp}>
+              {fetchedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 조회
+            </span>
           )}
-        </>
+        </div>
       )}
     </section>
   );
