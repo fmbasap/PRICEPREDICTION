@@ -544,7 +544,14 @@ export default function CryptoTrendDashboard() {
       // 최소 저장 간격: 시간별=10분, 일별=1일
       const MIN_SAVE_INTERVAL_MS = timeframe === "hourly" ? 10 * 60 * 1000 : 24 * 60 * 60 * 1000;
       const canAppend = !lastBatch || Date.now() - lastBatch.createdAt >= MIN_SAVE_INTERVAL_MS;
-      if (canAppend) {
+
+      // 신뢰도 필터: 추세연장선이 가리키는 최종 변화율이 너무 작으면(방향이 애매하면)
+      // 틀릴 확률이 높으므로 아예 예측을 저장하지 않고 건너뜀. 시간별은 예측 구간이
+      // 짧아 원래 변동폭이 작아서 기준을 낮게, 일별은 기준을 조금 높게 잡음.
+      const MIN_SIGNAL_PCT = timeframe === "hourly" ? 0.3 : 1.0;
+      const signalStrong = Math.abs(analysis.projectedChangePct) >= MIN_SIGNAL_PCT;
+
+      if (canAppend && signalStrong) {
         const targets = analysis.chartData
           .filter((d) => d.projection != null && d.price == null)
           .map((d) => ({ ts: d.ts, predicted: d.projection, actual: null, resolved: false }));
@@ -966,8 +973,9 @@ function PredictionAccuracyCard({ log, timeframe }) {
 
       <div style={{ ...styles.posNote, marginTop: 10 }}>
         새 예측은 최소 {timeframe === "hourly" ? "10분" : "1일"} 간격으로만 저장됩니다 (새로고침을 여러 번 해도
-        중복 저장되지 않습니다). 이 기기(브라우저)에만 저장되며, 다른 기기나 시크릿 모드에서는 기록이 보이지
-        않아요.
+        중복 저장되지 않습니다). 추세연장선의 예상 변화율이 {timeframe === "hourly" ? "0.3%" : "1.0%"} 미만으로
+        방향이 애매할 땐 예측을 아예 저장하지 않고 건너뜁니다 (신뢰도 낮은 예측을 걸러내기 위함). 이 기기(브라우저)에만
+        저장되며, 다른 기기나 시크릿 모드에서는 기록이 보이지 않아요.
       </div>
     </section>
   );
