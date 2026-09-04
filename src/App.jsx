@@ -796,6 +796,8 @@ export default function CryptoTrendDashboard() {
 
             {hasAccess("silver") && <HoldScenarioNarrativePanel />}
 
+            {hasAccess("silver") && <CheckpointSummaryPanel />}
+
             <footer style={styles.disclaimer}>
               이 화면의 추세 연장선은 최근 구간의 가격 흐름을 단순 선형 회귀로 연장한 통계적 참고선이며,
               실제 미래 가격을 예측하지 않습니다. 뉴스 기반 심리 섹션도 최신 검색 결과를 요약한 참고
@@ -2852,6 +2854,138 @@ function ScenarioBattlePanel() {
           보여줍니다.
         </div>
       </div>
+    </section>
+  );
+}
+
+function CheckpointSummaryPanel() {
+  const [actuals, setActuals] = useState({});
+  const [loading, setLoading] = useState(false);
+
+  const checkpointDates = Object.keys(SCENARIOS.kim.checkpoints).sort();
+  const today = new Date();
+  const passedCheckpoints = checkpointDates.filter((d) => new Date(d + "T23:59:59") <= today);
+  const baselineMs = new Date(SCENARIO_BASELINE_DATE + "T00:00:00Z").getTime();
+
+  const fetchActuals = async () => {
+    setLoading(true);
+    try {
+      const next = {};
+      for (const coinKey of Object.keys(SCENARIO_COINS)) {
+        if (supabase) {
+          const { data } = await supabase.from("scenario_actuals").select("*").eq("coin", coinKey);
+          (data || []).forEach((row) => {
+            next[`${coinKey}:${row.checkpoint_date}`] = Number(row.actual_price);
+          });
+        }
+      }
+      setActuals(next);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchActuals();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (passedCheckpoints.length === 0) return null;
+
+  const rows = [];
+  passedCheckpoints.forEach((cpDate) => {
+    const horizonHours = Math.max(
+      0.01,
+      (new Date(cpDate + "T00:00:00Z").getTime() - baselineMs) / (60 * 60 * 1000)
+    );
+    const weight = getHorizonWeight(horizonHours);
+    Object.entries(SCENARIO_COINS).forEach(([coinKey, coinMeta]) => {
+      const actual = actuals[`${coinKey}:${cpDate}`];
+      if (actual == null) return;
+      const actualPct = ((actual - coinMeta.baseline) / coinMeta.baseline) * 100;
+      const perScenario = Object.entries(SCENARIOS).map(([sKey, s]) => {
+        const predictedPct = s.checkpoints[cpDate][coinKey];
+        const target = coinMeta.baseline * (1 + predictedPct / 100);
+        const errPct = (Math.abs(actual - target) / target) * 100;
+        const isHit =
+          Math.abs(predictedPct) >= 1e-9 &&
+          Math.abs(actualPct) >= 1e-9 &&
+          Math.sign(predictedPct) === Math.sign(actualPct);
+        const points = Math.abs(predictedPct) < 1e-9 || Math.abs(actualPct) < 1e-9 ? null : isHit ? weight : -7;
+        return { key: sKey, label: s.label.split(" ")[0], color: s.color, target, errPct, isHit, points };
+      });
+      rows.push({ cpDate, coinKey, actual, actualPct, weight, perScenario });
+    });
+  });
+
+  return (
+    <section style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>체크포인트 결과 요약</div>
+        <button onClick={fetchActuals} style={styles.newsBtn} disabled={loading}>
+          <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
+          갱신
+        </button>
+      </div>
+
+      <div style={styles.posNote}>
+        지난 체크포인트마다 어느 시나리오가 더 맞았는지 코인별로 정리했습니다. 다음 시나리오를 조정하고
+        싶으실 때, 이 내용을 그대로 캡처하거나 복사해서 Claude에게 보여주시면 바로 상의할 수 있어요.
+      </div>
+
+      {passedCheckpoints.map((cpDate) => {
+        const cpRows = rows.filter((r) => r.cpDate === cpDate);
+        if (cpRows.length === 0) return null;
+        return (
+          <div key={cpDate} style={{ marginTop: 14 }}>
+            <div style={{ ...styles.posLabel, color: "#EDEAE3", fontSize: 12, marginBottom: 6 }}>
+              {cpDate} (가중치 {cpRows[0].weight}점)
+            </div>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={styles.th}>코인</th>
+                  <th style={{ ...styles.th, textAlign: "right" }}>실제 변화율</th>
+                  {Object.entries(SCENARIOS).map(([key, s]) => (
+                    <th key={key} style={{ ...styles.th, textAlign: "right", color: s.color }}>
+                      {s.label.split(" ")[0]}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {cpRows.map((r, i) => (
+                  <tr key={r.coinKey} style={i % 2 === 1 ? styles.trAlt : undefined}>
+                    <td style={styles.td}>{r.coinKey}</td>
+                    <td
+                      style={{
+                        ...styles.td,
+                        textAlign: "right",
+                        color: r.actualPct >= 0 ? "#6FCB9F" : "#E2604F",
+                      }}
+                    >
+                      {r.actualPct >= 0 ? "+" : ""}
+                      {r.actualPct.toFixed(1)}%
+                    </td>
+                    {r.perScenario.map((s) => (
+                      <td key={s.key} style={{ ...styles.td, textAlign: "right" }}>
+                        {s.points == null ? (
+                          <span style={{ color: "#5B6660" }}>횡보</span>
+                        ) : (
+                          <span style={{ color: s.isHit ? "#6FCB9F" : "#E2604F" }}>
+                            {s.isHit ? "적중" : "빗나감"} ({s.points >= 0 ? "+" : ""}
+                            {s.points})
+                          </span>
+                        )}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        );
+      })}
     </section>
   );
 }
