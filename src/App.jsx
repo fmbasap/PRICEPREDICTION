@@ -3888,21 +3888,30 @@ function ExchangeFlowPanel() {
 }
 
 function GarlinghouseTimelinePanel() {
-  const [liveEntries, setLiveEntries] = useState(null);
+  const [liveEntries, setLiveEntries] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [fetchedAt, setFetchedAt] = useState(null);
+  const [noMoreEntries, setNoMoreEntries] = useState(false);
 
   const lastStaticDate = GARLINGHOUSE_TIMELINE[GARLINGHOUSE_TIMELINE.length - 1].date;
+  // 지금까지 찾은 것 중 가장 최근 날짜부터 이어서 검색 (매번 처음부터 다시 찾지 않도록)
+  const sinceDate =
+    liveEntries.length > 0 ? liveEntries[liveEntries.length - 1].date : lastStaticDate;
 
   const fetchLatest = async () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`/api/garlinghouse?since=${encodeURIComponent(lastStaticDate)}`);
+      const res = await fetch(`/api/garlinghouse?since=${encodeURIComponent(sinceDate)}`);
       const data = await res.json();
       if (!res.ok || data.error) throw new Error(data.error || `조회에 실패했습니다 (${res.status})`);
-      setLiveEntries(data.entries || []);
+      const newEntries = data.entries || [];
+      if (newEntries.length === 0) {
+        setNoMoreEntries(true);
+      } else {
+        setLiveEntries((prev) => [...prev, ...newEntries]);
+      }
       setFetchedAt(new Date());
     } catch (e) {
       setError(e.message || "최신 발언을 불러오지 못했습니다");
@@ -3911,15 +3920,15 @@ function GarlinghouseTimelinePanel() {
     }
   };
 
-  const allEntries = [...GARLINGHOUSE_TIMELINE, ...(liveEntries || [])];
+  const allEntries = [...GARLINGHOUSE_TIMELINE, ...liveEntries];
 
   return (
     <section style={styles.newsCard}>
       <div style={styles.newsHeader}>
         <div style={styles.tableTitle}>갈링하우스(Ripple CEO) 발언 타임라인</div>
-        <button onClick={fetchLatest} style={styles.newsBtn} disabled={loading}>
+        <button onClick={fetchLatest} style={styles.newsBtn} disabled={loading || noMoreEntries}>
           <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
-          {loading ? "검색 중…" : "최신 발언 갱신"}
+          {loading ? "검색 중…" : noMoreEntries ? "더 이상 없음" : "최신 발언 갱신"}
         </button>
       </div>
 
@@ -3930,9 +3939,9 @@ function GarlinghouseTimelinePanel() {
         </div>
       )}
 
-      {liveEntries && liveEntries.length === 0 && (
+      {noMoreEntries && (
         <div style={{ ...styles.posNote, marginBottom: 8, color: "#5B9BD5" }}>
-          {lastStaticDate} 이후로 새로 찾은 발언은 없었습니다.
+          {sinceDate} 이후로 새로 찾은 발언은 없었습니다. (추가 호출은 막아뒀습니다 — 비용 절약)
         </div>
       )}
 
@@ -3964,8 +3973,9 @@ function GarlinghouseTimelinePanel() {
       )}
 
       <div style={{ ...styles.posNote, marginTop: 10 }}>
-        {lastStaticDate}까지는 정리해둔 고정 데이터이고, "최신 발언 갱신"을 누르면 그 이후 발언을 실시간
-        검색해서 초록색 점(NEW)으로 이어붙입니다. 검색은 누를 때마다 실행되며(자동 반복 아님), 원문 그대로의
+        {lastStaticDate}까지는 정리해둔 고정 데이터이고, "최신 발언 갱신"을 누를 때마다 지금까지 찾은 것
+        이후부터 이어서 검색해서 초록색 점(NEW)으로 계속 누적됩니다. 더 이상 새로 찾을 게 없으면 버튼이
+        "더 이상 없음"으로 바뀌며 잠기고, 그 이후엔 눌러도 호출이 안 나갑니다 (비용 방지). 원문 그대로의
         인용이 아니라 요약입니다.
       </div>
     </section>
