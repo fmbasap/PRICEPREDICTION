@@ -670,32 +670,69 @@ export default function CryptoTrendDashboard() {
   // ---- 사용자 직접 예측: 지나간 목표시점 자동 검증 ----
   const [userPredLog, setUserPredLog] = useState([]);
 
+  // Supabase 행을 로컬에서 쓰는 형태로 변환
+  const rowToEntry = (row) => ({
+    id: row.id,
+    supabaseId: row.id,
+    createdAt: new Date(row.created_at).getTime(),
+    targetTs: new Date(row.target_ts).getTime(),
+    basePrice: Number(row.base_price),
+    predicted: Number(row.predicted),
+    actual: row.actual != null ? Number(row.actual) : null,
+    resolved: row.resolved,
+  });
+
   useEffect(() => {
     if (!cache[asset]) return;
-    let log = loadUserPredLog(asset);
-    // 사용자가 자유롭게 목표시점을 고르므로, 넉넉하게(12시간) 허용오차를 둠
-    const { log: resolvedLog, changed } = resolveUserPredLog(log, cache[asset], 12 * 60 * 60 * 1000);
-    if (changed) {
-      saveUserPredLog(asset, resolvedLog);
-      // 이번에 새로 확정(resolved)된 것들 중 서버에도 등록돼있던(supabaseId 있는) 항목은
-      // 점수를 계산해서 서버에도 반영 -> 랭킹에 집계됨
+
+    (async () => {
+      let log;
+      let isRemote = false;
+
       if (supabase && session) {
-        resolvedLog.forEach((t) => {
-          const prev = log.find((p) => p.id === t.id);
-          if (t.resolved && (!prev || !prev.resolved) && t.supabaseId) {
-            const predictedDir = t.predicted - t.basePrice;
-            const actualDir = t.actual - t.basePrice;
-            const isFlat = Math.abs(predictedDir) < 1e-9 || Math.abs(actualDir) < 1e-9;
-            const isHit = !isFlat && Math.sign(predictedDir) === Math.sign(actualDir);
-            const horizonHours = Math.max(0.01, (t.targetTs - t.createdAt) / (60 * 60 * 1000));
-            const weight = getHorizonWeight(horizonHours);
-            const points = isFlat ? 0 : isHit ? weight : -7;
-            supabase.rpc("resolve_my_prediction", { p_id: t.supabaseId, p_actual: t.actual, p_points: points });
-          }
-        });
+        // 로그인 상태: Supabase가 데이터 원본 (기기를 바꿔도 그대로 보임)
+        const { data, error } = await supabase
+          .from("user_predictions")
+          .select("*")
+          .eq("user_id", session.user.id)
+          .eq("asset", asset)
+          .order("created_at", { ascending: true });
+        if (!error && data) {
+          log = data.map(rowToEntry);
+          isRemote = true;
+        } else {
+          log = loadUserPredLog(asset); // 서버 조회 실패 시 로컬로 폴백
+        }
+      } else {
+        // 비로그인: 이 기기(브라우저)에만 저장
+        log = loadUserPredLog(asset);
       }
-    }
-    setUserPredLog(resolvedLog);
+
+      // 사용자가 자유롭게 목표시점을 고르므로, 넉넉하게(12시간) 허용오차를 둠
+      const { log: resolvedLog, changed } = resolveUserPredLog(log, cache[asset], 12 * 60 * 60 * 1000);
+
+      if (changed) {
+        if (isRemote) {
+          // 새로 확정된 것들을 서버에 반영 (점수 계산 포함) -> 랭킹/다른 기기에도 반영됨
+          for (const t of resolvedLog) {
+            const prev = log.find((p) => p.id === t.id);
+            if (t.resolved && (!prev || !prev.resolved)) {
+              const predictedDir = t.predicted - t.basePrice;
+              const actualDir = t.actual - t.basePrice;
+              const isFlat = Math.abs(predictedDir) < 1e-9 || Math.abs(actualDir) < 1e-9;
+              const isHit = !isFlat && Math.sign(predictedDir) === Math.sign(actualDir);
+              const horizonHours = Math.max(0.01, (t.targetTs - t.createdAt) / (60 * 60 * 1000));
+              const weight = getHorizonWeight(horizonHours);
+              const points = isFlat ? 0 : isHit ? weight : -7;
+              await supabase.rpc("resolve_my_prediction", { p_id: t.supabaseId, p_actual: t.actual, p_points: points });
+            }
+          }
+        } else {
+          saveUserPredLog(asset, resolvedLog);
+        }
+      }
+      setUserPredLog(resolvedLog);
+    })();
   }, [cache, asset, session]);
 
   const addUserPrediction = async (predictedPrice, targetDateTimeLocal) => {
@@ -705,27 +742,25 @@ export default function CryptoTrendDashboard() {
     if (targetTs <= Date.now()) return { ok: false, message: "목표 시점은 미래여야 합니다" };
     if (!predictedPrice || Number.isNaN(predictedPrice)) return { ok: false, message: "예측 가격을 입력해주세요" };
 
-    let supabaseId = null;
-    // 로그인 상태면 서버에도 같이 등록해서, 랭킹에 반영될 수 있게 함
     if (supabase && session) {
-      try {
-        const { data, error } = await supabase
-          .from("user_predictions")
-          .insert({
-            user_id: session.user.id,
-            asset,
-            target_ts: new Date(targetTs).toISOString(),
-            base_price: analysis.currentPrice,
-            predicted: predictedPrice,
-          })
-          .select("id")
-          .single();
-        if (!error && data) supabaseId = data.id;
-      } catch {
-        // 서버 저장 실패해도 로컬 기록은 그대로 진행 (랭킹 반영만 안 됨)
-      }
+      // 로그인 상태: Supabase에만 저장 (기기 간 동기화)
+      const { data, error } = await supabase
+        .from("user_predictions")
+        .insert({
+          user_id: session.user.id,
+          asset,
+          target_ts: new Date(targetTs).toISOString(),
+          base_price: analysis.currentPrice,
+          predicted: predictedPrice,
+        })
+        .select("*")
+        .single();
+      if (error || !data) return { ok: false, message: error?.message || "서버 저장에 실패했습니다" };
+      setUserPredLog((prev) => [...prev, rowToEntry(data)]);
+      return { ok: true };
     }
 
+    // 비로그인: 이 기기에만 저장
     const entry = {
       id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
       createdAt: Date.now(),
@@ -734,7 +769,6 @@ export default function CryptoTrendDashboard() {
       predicted: predictedPrice,
       actual: null,
       resolved: false,
-      supabaseId,
     };
     const next = [...userPredLog, entry];
     saveUserPredLog(asset, next);
@@ -746,13 +780,14 @@ export default function CryptoTrendDashboard() {
   const cancelUserPrediction = async (id) => {
     const target = userPredLog.find((t) => t.id === id);
     if (!target || target.resolved) return; // 이미 채점된 건 취소 불가
-    if (target.supabaseId && supabase && session) {
-      try {
-        await supabase.from("user_predictions").delete().eq("id", target.supabaseId);
-      } catch {
-        // 서버 삭제 실패해도 로컬은 지움 (랭킹엔 남을 수 있으나 흔치 않은 경우)
-      }
+
+    if (supabase && session && target.supabaseId) {
+      const { error } = await supabase.from("user_predictions").delete().eq("id", target.supabaseId);
+      if (error) return; // 삭제 실패 시 그대로 두어 다음에 다시 시도할 수 있게 함
+      setUserPredLog((prev) => prev.filter((t) => t.id !== id));
+      return;
     }
+
     const next = userPredLog.filter((t) => t.id !== id);
     saveUserPredLog(asset, next);
     setUserPredLog(next);
@@ -3607,30 +3642,85 @@ function ExchangeFlowPanel() {
 }
 
 function GarlinghouseTimelinePanel() {
+  const [liveEntries, setLiveEntries] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [fetchedAt, setFetchedAt] = useState(null);
+
+  const lastStaticDate = GARLINGHOUSE_TIMELINE[GARLINGHOUSE_TIMELINE.length - 1].date;
+
+  const fetchLatest = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/garlinghouse?since=${encodeURIComponent(lastStaticDate)}`);
+      const data = await res.json();
+      if (!res.ok || data.error) throw new Error(data.error || `조회에 실패했습니다 (${res.status})`);
+      setLiveEntries(data.entries || []);
+      setFetchedAt(new Date());
+    } catch (e) {
+      setError(e.message || "최신 발언을 불러오지 못했습니다");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const allEntries = [...GARLINGHOUSE_TIMELINE, ...(liveEntries || [])];
+
   return (
     <section style={styles.newsCard}>
       <div style={styles.newsHeader}>
         <div style={styles.tableTitle}>갈링하우스(Ripple CEO) 발언 타임라인</div>
+        <button onClick={fetchLatest} style={styles.newsBtn} disabled={loading}>
+          <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
+          {loading ? "검색 중…" : "최신 발언 갱신"}
+        </button>
       </div>
+
+      {error && (
+        <div style={{ ...styles.errorBox, marginBottom: 0 }}>
+          <AlertTriangle size={14} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {liveEntries && liveEntries.length === 0 && (
+        <div style={{ ...styles.posNote, marginBottom: 8, color: "#5B9BD5" }}>
+          {lastStaticDate} 이후로 새로 찾은 발언은 없었습니다.
+        </div>
+      )}
+
       <div style={styles.timelineList}>
-        {GARLINGHOUSE_TIMELINE.map((item, i) => (
-          <div key={i} style={styles.timelineRow}>
-            <div style={styles.timelineDotCol}>
-              <div style={styles.timelineDot} />
-              {i < GARLINGHOUSE_TIMELINE.length - 1 && <div style={styles.timelineLine} />}
-            </div>
-            <div style={styles.timelineContent}>
-              <div style={styles.timelineDate}>
-                {item.date} <span style={styles.timelinePeriod}>· {item.period}</span>
+        {allEntries.map((item, i) => {
+          const isLive = i >= GARLINGHOUSE_TIMELINE.length;
+          return (
+            <div key={i} style={styles.timelineRow}>
+              <div style={styles.timelineDotCol}>
+                <div style={{ ...styles.timelineDot, background: isLive ? "#6FCB9F" : "#5B9BD5" }} />
+                {i < allEntries.length - 1 && <div style={styles.timelineLine} />}
               </div>
-              <div style={styles.timelineText}>{item.text}</div>
+              <div style={styles.timelineContent}>
+                <div style={styles.timelineDate}>
+                  {item.date} <span style={styles.timelinePeriod}>· {item.period}</span>
+                  {isLive && <span style={{ color: "#6FCB9F", marginLeft: 6, fontSize: 10 }}>NEW</span>}
+                </div>
+                <div style={styles.timelineText}>{item.text}</div>
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
+
+      {fetchedAt && (
+        <div style={{ ...styles.newsTimestamp, marginTop: 8 }}>
+          {fetchedAt.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })} 최신 발언 검색됨
+        </div>
+      )}
+
       <div style={{ ...styles.posNote, marginTop: 10 }}>
-        공개된 인터뷰·SNS·보도자료를 바탕으로 정리한 고정 데이터입니다 (실시간 갱신 아님). 원문 그대로의
-        인용이 아니라 요약이며, 최신 발언은 별도로 추가해드릴 수 있습니다.
+        {lastStaticDate}까지는 정리해둔 고정 데이터이고, "최신 발언 갱신"을 누르면 그 이후 발언을 실시간
+        검색해서 초록색 점(NEW)으로 이어붙입니다. 검색은 누를 때마다 실행되며(자동 반복 아님), 원문 그대로의
+        인용이 아니라 요약입니다.
       </div>
     </section>
   );
