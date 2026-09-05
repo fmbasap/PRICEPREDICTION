@@ -1176,7 +1176,12 @@ export default function CryptoTrendDashboard() {
               <LockedPanel title="예측시장 전망 (Polymarket)" requiredTier="bronze" />
             )}
 
-            {asset === "XRP" && <GarlinghouseTimelinePanel />}
+            {asset === "XRP" &&
+              (hasAccess("gold") ? (
+                <GarlinghouseTimelinePanel />
+              ) : (
+                <LockedPanel title="갈링하우스(Ripple CEO) 발언 타임라인" requiredTier="gold" />
+              ))}
 
             {asset === "XRP" &&
               (hasAccess("silver") ? <ExchangeFlowPanel /> : <LockedPanel title="대형 지갑 잔고 추적" requiredTier="silver" />)}
@@ -1821,7 +1826,7 @@ function SubscribeModal({ profile, onClose }) {
             </div>
             <div style={styles.tierCard}>
               <div style={styles.tierName}>골드 · 월 50,000원</div>
-              <div style={styles.tierDesc}>실버 전체 + 뉴스 기반 심리</div>
+              <div style={styles.tierDesc}>실버 전체 + 뉴스 기반 심리 + 갈링하우스 발언 타임라인</div>
               <button onClick={() => request("gold")} style={styles.modalPrimaryBtn} disabled={requesting}>
                 골드 신청
               </button>
