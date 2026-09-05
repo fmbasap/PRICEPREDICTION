@@ -358,7 +358,7 @@ function resolvePredLog(log, rawPrices, toleranceMs) {
 }
 
 export default function CryptoTrendDashboard() {
-  const [asset, setAsset] = useState("FLR");
+  const [asset, setAsset] = useState("XRP");
   const [timeframe, setTimeframe] = useState("hourly");
   const [cache, setCache] = useState({});
   const [loading, setLoading] = useState(true);
