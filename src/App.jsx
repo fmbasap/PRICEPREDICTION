@@ -226,6 +226,13 @@ function holtForecast(points, forwardSteps, alpha = 0.4, beta = 0.2) {
   return { projected, finalLevel: level, finalTrend: trend };
 }
 
+// <input type="datetime-local">에 넣을 수 있는 "현재 시각" 문자열 (로컬 타임존 기준, YYYY-MM-DDTHH:mm)
+function nowForDateTimeLocal() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 function fmtPrice(v) {
   if (v == null) return "-";
   if (v < 0.01) return `$${v.toFixed(6)}`;
@@ -1148,7 +1155,7 @@ function PredictionAccuracyCard({ log, timeframe, userPredLog, onAddUserPredicti
 
   // ---- 입력 폼 상태 ----
   const [priceInput, setPriceInput] = useState("");
-  const [timeInput, setTimeInput] = useState("");
+  const [timeInput, setTimeInput] = useState(() => nowForDateTimeLocal());
   const [formError, setFormError] = useState(null);
   const [formSuccess, setFormSuccess] = useState(false);
 
@@ -1162,7 +1169,7 @@ function PredictionAccuracyCard({ log, timeframe, userPredLog, onAddUserPredicti
     } else {
       setFormSuccess(true);
       setPriceInput("");
-      setTimeInput("");
+      setTimeInput(nowForDateTimeLocal());
     }
   };
 
