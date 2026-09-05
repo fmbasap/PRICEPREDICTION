@@ -682,58 +682,59 @@ export default function CryptoTrendDashboard() {
     resolved: row.resolved,
   });
 
-  useEffect(() => {
+  const refreshUserPredLog = useCallback(async () => {
     if (!cache[asset]) return;
+    let log;
+    let isRemote = false;
 
-    (async () => {
-      let log;
-      let isRemote = false;
+    if (supabase && session) {
+      // 로그인 상태: Supabase가 데이터 원본 (기기를 바꿔도 그대로 보임)
+      const { data, error } = await supabase
+        .from("user_predictions")
+        .select("*")
+        .eq("user_id", session.user.id)
+        .eq("asset", asset)
+        .order("created_at", { ascending: true });
+      if (!error && data) {
+        log = data.map(rowToEntry);
+        isRemote = true;
+      } else {
+        log = loadUserPredLog(asset); // 서버 조회 실패 시 로컬로 폴백
+      }
+    } else {
+      // 비로그인: 이 기기(브라우저)에만 저장
+      log = loadUserPredLog(asset);
+    }
 
-      if (supabase && session) {
-        // 로그인 상태: Supabase가 데이터 원본 (기기를 바꿔도 그대로 보임)
-        const { data, error } = await supabase
-          .from("user_predictions")
-          .select("*")
-          .eq("user_id", session.user.id)
-          .eq("asset", asset)
-          .order("created_at", { ascending: true });
-        if (!error && data) {
-          log = data.map(rowToEntry);
-          isRemote = true;
-        } else {
-          log = loadUserPredLog(asset); // 서버 조회 실패 시 로컬로 폴백
+    // 사용자가 자유롭게 목표시점을 고르므로, 넉넉하게(12시간) 허용오차를 둠
+    const { log: resolvedLog, changed } = resolveUserPredLog(log, cache[asset], 12 * 60 * 60 * 1000);
+
+    if (changed) {
+      if (isRemote) {
+        // 새로 확정된 것들을 서버에 반영 (점수 계산 포함) -> 랭킹/다른 기기에도 반영됨
+        for (const t of resolvedLog) {
+          const prev = log.find((p) => p.id === t.id);
+          if (t.resolved && (!prev || !prev.resolved)) {
+            const predictedDir = t.predicted - t.basePrice;
+            const actualDir = t.actual - t.basePrice;
+            const isFlat = Math.abs(predictedDir) < 1e-9 || Math.abs(actualDir) < 1e-9;
+            const isHit = !isFlat && Math.sign(predictedDir) === Math.sign(actualDir);
+            const horizonHours = Math.max(0.01, (t.targetTs - t.createdAt) / (60 * 60 * 1000));
+            const weight = getHorizonWeight(horizonHours);
+            const points = isFlat ? 0 : isHit ? weight : -7;
+            await supabase.rpc("resolve_my_prediction", { p_id: t.supabaseId, p_actual: t.actual, p_points: points });
+          }
         }
       } else {
-        // 비로그인: 이 기기(브라우저)에만 저장
-        log = loadUserPredLog(asset);
+        saveUserPredLog(asset, resolvedLog);
       }
-
-      // 사용자가 자유롭게 목표시점을 고르므로, 넉넉하게(12시간) 허용오차를 둠
-      const { log: resolvedLog, changed } = resolveUserPredLog(log, cache[asset], 12 * 60 * 60 * 1000);
-
-      if (changed) {
-        if (isRemote) {
-          // 새로 확정된 것들을 서버에 반영 (점수 계산 포함) -> 랭킹/다른 기기에도 반영됨
-          for (const t of resolvedLog) {
-            const prev = log.find((p) => p.id === t.id);
-            if (t.resolved && (!prev || !prev.resolved)) {
-              const predictedDir = t.predicted - t.basePrice;
-              const actualDir = t.actual - t.basePrice;
-              const isFlat = Math.abs(predictedDir) < 1e-9 || Math.abs(actualDir) < 1e-9;
-              const isHit = !isFlat && Math.sign(predictedDir) === Math.sign(actualDir);
-              const horizonHours = Math.max(0.01, (t.targetTs - t.createdAt) / (60 * 60 * 1000));
-              const weight = getHorizonWeight(horizonHours);
-              const points = isFlat ? 0 : isHit ? weight : -7;
-              await supabase.rpc("resolve_my_prediction", { p_id: t.supabaseId, p_actual: t.actual, p_points: points });
-            }
-          }
-        } else {
-          saveUserPredLog(asset, resolvedLog);
-        }
-      }
-      setUserPredLog(resolvedLog);
-    })();
+    }
+    setUserPredLog(resolvedLog);
   }, [cache, asset, session]);
+
+  useEffect(() => {
+    refreshUserPredLog();
+  }, [refreshUserPredLog]);
 
   const addUserPrediction = async (predictedPrice, targetDateTimeLocal) => {
     if (!analysis) return { ok: false, message: "현재가를 아직 못 불러왔습니다" };
@@ -999,6 +1000,9 @@ export default function CryptoTrendDashboard() {
               userPredLog={userPredLog}
               onAddUserPrediction={addUserPrediction}
               onCancelUserPrediction={cancelUserPrediction}
+              onRefreshUserPredLog={refreshUserPredLog}
+              onRefreshAll={() => loadAll(timeframe)}
+              refreshing={loading}
               currentPrice={analysis.currentPrice}
               session={session}
             />
@@ -1228,6 +1232,9 @@ function PredictionAccuracyCard({
   userPredLog,
   onAddUserPrediction,
   onCancelUserPrediction,
+  onRefreshUserPredLog,
+  onRefreshAll,
+  refreshing,
   currentPrice,
   session,
 }) {
@@ -1296,6 +1303,12 @@ function PredictionAccuracyCard({
     <section style={styles.newsCard}>
       <div style={styles.newsHeader}>
         <div style={styles.tableTitle}>예측 정확도 기록 (선형회귀 · 홀트 · 직접입력)</div>
+        {onRefreshAll && (
+          <button onClick={onRefreshAll} style={styles.newsBtn} disabled={refreshing}>
+            <RefreshCw size={12} style={{ animation: refreshing ? "spin 1s linear infinite" : "none" }} />
+            갱신
+          </button>
+        )}
       </div>
 
       {hasAnySignal && (
@@ -1313,7 +1326,15 @@ function PredictionAccuracyCard({
       </div>
 
       <div style={{ borderTop: "1px solid #232B27", paddingTop: 12, marginBottom: 12 }}>
-        <div style={{ ...styles.posLabel, marginBottom: 8 }}>내 예측 등록하기</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <div style={styles.posLabel}>내 예측 등록하기</div>
+          {session && (
+            <button onClick={() => onRefreshUserPredLog?.()} style={styles.newsBtn}>
+              <RefreshCw size={11} />
+              갱신 (다른 기기 반영)
+            </button>
+          )}
+        </div>
         {!session && (
           <div style={{ ...styles.posNote, color: "#5B9BD5", marginBottom: 8 }}>
             로그인하면 등록한 예측이 공개 랭킹에도 같이 반영됩니다 (비로그인 시 이 기기에만 기록).
