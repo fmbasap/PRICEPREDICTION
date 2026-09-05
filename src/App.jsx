@@ -3887,17 +3887,52 @@ function ExchangeFlowPanel() {
   );
 }
 
+const GARLINGHOUSE_LIVE_KEY = "garlinghouse_live_v1";
+
+function loadGarlinghouseLive() {
+  try {
+    const raw = localStorage.getItem(GARLINGHOUSE_LIVE_KEY);
+    return raw ? JSON.parse(raw) : { entries: [], noMoreEntries: false };
+  } catch {
+    return { entries: [], noMoreEntries: false };
+  }
+}
+
+function saveGarlinghouseLive(entries, noMoreEntries) {
+  try {
+    localStorage.setItem(GARLINGHOUSE_LIVE_KEY, JSON.stringify({ entries, noMoreEntries }));
+  } catch {
+    // 저장 실패는 조용히 무시
+  }
+}
+
 function GarlinghouseTimelinePanel() {
-  const [liveEntries, setLiveEntries] = useState([]);
+  const [liveEntries, setLiveEntries] = useState(() => loadGarlinghouseLive().entries);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [fetchedAt, setFetchedAt] = useState(null);
-  const [noMoreEntries, setNoMoreEntries] = useState(false);
+  const [noMoreEntries, setNoMoreEntries] = useState(() => loadGarlinghouseLive().noMoreEntries);
 
   const lastStaticDate = GARLINGHOUSE_TIMELINE[GARLINGHOUSE_TIMELINE.length - 1].date;
   // 지금까지 찾은 것 중 가장 최근 날짜부터 이어서 검색 (매번 처음부터 다시 찾지 않도록)
   const sinceDate =
     liveEntries.length > 0 ? liveEntries[liveEntries.length - 1].date : lastStaticDate;
+
+  // 페이지를 열 때, Supabase에 다른 사람이 이미 찾아둔 게 있으면 그걸 우선 불러옴 (기기/사용자 무관 공유)
+  useEffect(() => {
+    if (!supabase) return;
+    (async () => {
+      const { data, error } = await supabase
+        .from("garlinghouse_entries")
+        .select("*")
+        .order("entry_date", { ascending: true });
+      if (!error && data && data.length > 0) {
+        const shared = data.map((row) => ({ date: row.entry_date, period: row.period, text: row.entry_text }));
+        setLiveEntries(shared);
+        saveGarlinghouseLive(shared, false);
+      }
+    })();
+  }, []);
 
   const fetchLatest = async () => {
     setLoading(true);
@@ -3909,8 +3944,24 @@ function GarlinghouseTimelinePanel() {
       const newEntries = data.entries || [];
       if (newEntries.length === 0) {
         setNoMoreEntries(true);
+        saveGarlinghouseLive(liveEntries, true);
       } else {
-        setLiveEntries((prev) => [...prev, ...newEntries]);
+        // 다른 기기/사용자도 볼 수 있도록 Supabase에도 같이 저장
+        if (supabase) {
+          try {
+            await supabase.from("garlinghouse_entries").insert(
+              newEntries.map((e) => ({ entry_date: e.date, period: e.period, entry_text: e.text }))
+            );
+          } catch {
+            // 서버 저장 실패해도 이 기기에서는 계속 보이도록 진행
+          }
+        }
+        setLiveEntries((prev) => {
+          const merged = [...prev, ...newEntries];
+          saveGarlinghouseLive(merged, false);
+          return merged;
+        });
+        setNoMoreEntries(false);
       }
       setFetchedAt(new Date());
     } catch (e) {
@@ -3975,8 +4026,9 @@ function GarlinghouseTimelinePanel() {
       <div style={{ ...styles.posNote, marginTop: 10 }}>
         {lastStaticDate}까지는 정리해둔 고정 데이터이고, "최신 발언 갱신"을 누를 때마다 지금까지 찾은 것
         이후부터 이어서 검색해서 초록색 점(NEW)으로 계속 누적됩니다. 더 이상 새로 찾을 게 없으면 버튼이
-        "더 이상 없음"으로 바뀌며 잠기고, 그 이후엔 눌러도 호출이 안 나갑니다 (비용 방지). 원문 그대로의
-        인용이 아니라 요약입니다.
+        "더 이상 없음"으로 바뀌며 잠기고, 그 이후엔 눌러도 호출이 안 나갑니다 (비용 방지). 새로 찾은 발언은
+        서버에도 저장되어 다른 기기·다른 사용자도 같은 목록을 봅니다 — 누군가 한 번 찾아두면, 다른 사람은
+        다시 검색할 필요 없이 그 결과를 그대로 봅니다. 원문 그대로의 인용이 아니라 요약입니다.
       </div>
     </section>
   );
