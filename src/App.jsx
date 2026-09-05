@@ -226,6 +226,33 @@ function holtForecast(points, forwardSteps, alpha = 0.4, beta = 0.2) {
   return { projected, finalLevel: level, finalTrend: trend };
 }
 
+// 감쇠추세 홀트(Damped Holt) - 일반 홀트는 "지금 추세가 끝까지 그대로 간다"고 가정하는데,
+// 여기엔 시간이 지날수록 추세의 기세가 phi만큼씩 서서히 약해지는 감쇠 계수를 추가함.
+// 먼 미래로 갈수록 과도하게 확신에 찬 직선을 덜 그리게 되어, 실전에서 일반 홀트보다 나은 경우가 많음.
+function dampedHoltForecast(points, forwardSteps, alpha = 0.4, beta = 0.2, phi = 0.95) {
+  const n = points.length;
+  if (n < 2) return { projected: [], finalLevel: null, finalTrend: null };
+
+  let level = points[0];
+  let trend = points[1] - points[0];
+
+  for (let i = 1; i < n; i++) {
+    const prevLevel = level;
+    level = alpha * points[i] + (1 - alpha) * (level + phi * trend);
+    trend = beta * (level - prevLevel) + (1 - beta) * phi * trend;
+  }
+
+  const projected = [];
+  let phiSum = 0;
+  let phiPow = phi;
+  for (let h = 1; h <= forwardSteps; h++) {
+    phiSum += phiPow;
+    projected.push(level + phiSum * trend);
+    phiPow *= phi;
+  }
+  return { projected, finalLevel: level, finalTrend: trend };
+}
+
 // <input type="datetime-local">에 넣을 수 있는 "현재 시각" 문자열 (로컬 타임존 기준, YYYY-MM-DDTHH:mm)
 function nowForDateTimeLocal() {
   const d = new Date();
@@ -353,6 +380,7 @@ function resolvePredLog(log, rawPrices, toleranceMs) {
     ...batch,
     targets: resolveArr(batch.targets),
     holtTargets: resolveArr(batch.holtTargets), // 예전 기록(홀트 도입 전)은 undefined -> 빈 배열로 처리됨
+    dampedHoltTargets: resolveArr(batch.dampedHoltTargets), // 예전 기록(감쇠홀트 도입 전)도 마찬가지
   }));
   return { log: nextLog, changed };
 }
@@ -529,17 +557,23 @@ export default function CryptoTrendDashboard() {
       smaSlow: smaSlow[i],
       projection: null,
       holtProjection: null,
+      dampedHoltProjection: null,
     }));
 
     const recentWindow = prices.slice(-tfConf.regressionWindow);
     const { projected, slope } = linearRegressionProjection(recentWindow, tfConf.forwardUnits);
     const { projected: holtProjected, finalTrend: holtTrend } = holtForecast(recentWindow, tfConf.forwardUnits);
+    const { projected: dampedHoltProjected, finalTrend: dampedHoltTrend } = dampedHoltForecast(
+      recentWindow,
+      tfConf.forwardUnits
+    );
     const lastTs = timestamps[timestamps.length - 1];
 
     chartData[chartData.length - 1] = {
       ...chartData[chartData.length - 1],
       projection: chartData[chartData.length - 1].price,
       holtProjection: chartData[chartData.length - 1].price,
+      dampedHoltProjection: chartData[chartData.length - 1].price,
     };
 
     projected.forEach((val, idx) => {
@@ -552,6 +586,7 @@ export default function CryptoTrendDashboard() {
         smaSlow: null,
         projection: val,
         holtProjection: holtProjected[idx] ?? null,
+        dampedHoltProjection: dampedHoltProjected[idx] ?? null,
       });
     });
 
@@ -602,6 +637,11 @@ export default function CryptoTrendDashboard() {
         ? ((holtProjected[holtProjected.length - 1] - currentPrice) / currentPrice) * 100
         : 0;
 
+    const dampedHoltProjectedChangePct =
+      currentPrice && dampedHoltProjected.length
+        ? ((dampedHoltProjected[dampedHoltProjected.length - 1] - currentPrice) / currentPrice) * 100
+        : 0;
+
     return {
       chartData,
       currentPrice,
@@ -618,6 +658,8 @@ export default function CryptoTrendDashboard() {
       projectedChangePct,
       holtTrend,
       holtProjectedChangePct,
+      dampedHoltTrend,
+      dampedHoltProjectedChangePct,
     };
   }, [cache, asset, timeframe]);
 
@@ -650,8 +692,9 @@ export default function CryptoTrendDashboard() {
       const MIN_SIGNAL_PCT = timeframe === "hourly" ? 0.3 : 1.0;
       const linearSignalStrong = Math.abs(analysis.projectedChangePct) >= MIN_SIGNAL_PCT;
       const holtSignalStrong = Math.abs(analysis.holtProjectedChangePct) >= MIN_SIGNAL_PCT;
+      const dampedHoltSignalStrong = Math.abs(analysis.dampedHoltProjectedChangePct) >= MIN_SIGNAL_PCT;
 
-      if (canAppend && (linearSignalStrong || holtSignalStrong)) {
+      if (canAppend && (linearSignalStrong || holtSignalStrong || dampedHoltSignalStrong)) {
         const targets = linearSignalStrong
           ? analysis.chartData
               .filter((d) => d.projection != null && d.price == null)
@@ -662,8 +705,16 @@ export default function CryptoTrendDashboard() {
               .filter((d) => d.holtProjection != null && d.price == null)
               .map((d) => ({ ts: d.ts, predicted: d.holtProjection, actual: null, resolved: false }))
           : [];
-        if (targets.length > 0 || holtTargets.length > 0) {
-          log = [...log, { createdAt: Date.now(), basePrice: analysis.currentPrice, targets, holtTargets }];
+        const dampedHoltTargets = dampedHoltSignalStrong
+          ? analysis.chartData
+              .filter((d) => d.dampedHoltProjection != null && d.price == null)
+              .map((d) => ({ ts: d.ts, predicted: d.dampedHoltProjection, actual: null, resolved: false }))
+          : [];
+        if (targets.length > 0 || holtTargets.length > 0 || dampedHoltTargets.length > 0) {
+          log = [
+            ...log,
+            { createdAt: Date.now(), basePrice: analysis.currentPrice, targets, holtTargets, dampedHoltTargets },
+          ];
           appendChanged = true;
         }
       }
@@ -892,6 +943,7 @@ export default function CryptoTrendDashboard() {
                 <LegendItem color="#B388EB" label={tfConf.slowLabel} dashed />
                 <LegendItem color="#EDEAE3" label={`추세 연장선(${tfConf.forwardLabel})`} dotted />
                 <LegendItem color="#F4A6C6" label="홀트 예측선" dotted />
+                <LegendItem color="#8AD1B5" label="감쇠홀트 예측선" dotted />
               </div>
               <ResponsiveContainer width="100%" height={280}>
                 <ComposedChart data={analysis.chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
@@ -926,6 +978,7 @@ export default function CryptoTrendDashboard() {
                   <Line type="monotone" dataKey="price" stroke={meta.accent} strokeWidth={2} dot={false} connectNulls />
                   <Line type="monotone" dataKey="projection" stroke="#EDEAE3" strokeWidth={1.5} strokeDasharray="1 3" dot={false} connectNulls />
                   <Line type="monotone" dataKey="holtProjection" stroke="#F4A6C6" strokeWidth={1.5} strokeDasharray="1 3" dot={false} connectNulls />
+                  <Line type="monotone" dataKey="dampedHoltProjection" stroke="#8AD1B5" strokeWidth={1.5} strokeDasharray="1 3" dot={false} connectNulls />
                 </ComposedChart>
               </ResponsiveContainer>
             </section>
@@ -1002,6 +1055,42 @@ export default function CryptoTrendDashboard() {
               </table>
             </section>
 
+            <section style={styles.tableCard}>
+              <div style={styles.tableTitle}>감쇠홀트 예측 표 ({tfConf.forwardLabel})</div>
+              <table style={styles.table}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>시점</th>
+                    <th style={{ ...styles.th, textAlign: "right" }}>감쇠홀트 예측 가격</th>
+                    <th style={{ ...styles.th, textAlign: "right" }}>현재가 대비</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {analysis.chartData
+                    .filter((d) => d.dampedHoltProjection != null && d.price == null)
+                    .map((d, i) => {
+                      const pct = ((d.dampedHoltProjection - analysis.currentPrice) / analysis.currentPrice) * 100;
+                      return (
+                        <tr key={i} style={i % 2 === 1 ? styles.trAlt : undefined}>
+                          <td style={styles.td}>{d.date}</td>
+                          <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(d.dampedHoltProjection)}</td>
+                          <td
+                            style={{
+                              ...styles.td,
+                              textAlign: "right",
+                              color: pct >= 0 ? "#6FCB9F" : "#E2604F",
+                            }}
+                          >
+                            {pct >= 0 ? "+" : ""}
+                            {pct.toFixed(2)}%
+                          </td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+            </section>
+
             <PredictionAccuracyCard
               log={predLog}
               timeframe={timeframe}
@@ -1041,6 +1130,12 @@ export default function CryptoTrendDashboard() {
                 value={`${analysis.holtProjectedChangePct >= 0 ? "+" : ""}${analysis.holtProjectedChangePct.toFixed(1)}%`}
                 status={analysis.holtProjectedChangePct >= 0 ? "up" : "down"}
                 sub="이중지수평활 - 최근 변곡점 민감"
+              />
+              <SignalCard
+                title={`감쇠홀트 예측 (${tfConf.forwardLabel} 후)`}
+                value={`${analysis.dampedHoltProjectedChangePct >= 0 ? "+" : ""}${analysis.dampedHoltProjectedChangePct.toFixed(1)}%`}
+                status={analysis.dampedHoltProjectedChangePct >= 0 ? "up" : "down"}
+                sub="먼 미래일수록 추세 기세가 약해짐"
               />
             </section>
 
@@ -1286,20 +1381,23 @@ function PredictionAccuracyCard({
 }) {
   const linear = scoreMethod(log, "targets");
   const holt = scoreMethod(log, "holtTargets");
+  const dampedHolt = scoreMethod(log, "dampedHoltTargets");
   const user = scoreUserPredictions(userPredLog || []);
 
   const recentAll = [
     ...linear.scored.map((s) => ({ ...s, method: "선형" })),
     ...holt.scored.map((s) => ({ ...s, method: "홀트" })),
+    ...dampedHolt.scored.map((s) => ({ ...s, method: "감쇠홀트" })),
     ...user.scored.map((s) => ({ ...s, method: "직접입력" })),
   ]
     .sort((a, b) => b.ts - a.ts)
     .slice(0, 8);
 
-  // ---- 종합 판정: 세 방법의 지금까지 성적(점수)을 가중치 삼아 현재 진행 중인 방향을 합산 ----
+  // ---- 종합 판정: 네 방법의 지금까지 성적(점수)을 가중치 삼아 현재 진행 중인 방향을 합산 ----
   const scoreWeight = (total) => Math.max(0, total) + 0.5; // 점수가 마이너스여도 최소한의 발언권은 남겨둠
   const wLinear = scoreWeight(linear.totalScore);
   const wHolt = scoreWeight(holt.totalScore);
+  const wDampedHolt = scoreWeight(dampedHolt.totalScore);
   // 사용자의 "현재 유효한(아직 안 지난)" 가장 최근 예측 하나를 종합 판정에 반영
   const activeUserPred = [...(userPredLog || [])]
     .filter((t) => !t.resolved && t.targetTs > Date.now())
@@ -1309,6 +1407,7 @@ function PredictionAccuracyCard({
   // 종합 판정은 "지금 이 순간의 방향 신호"가 필요하므로, 각 방법의 마지막 저장된 예측(미확정 포함) 중 최신 걸 씀
   const latestLinear = [...log].reverse().find((b) => (b.targets || []).length > 0);
   const latestHolt = [...log].reverse().find((b) => (b.holtTargets || []).length > 0);
+  const latestDampedHolt = [...log].reverse().find((b) => (b.dampedHoltTargets || []).length > 0);
   const linearSignalDir =
     latestLinear && latestLinear.targets.length
       ? Math.sign(latestLinear.targets[latestLinear.targets.length - 1].predicted - latestLinear.basePrice)
@@ -1317,13 +1416,24 @@ function PredictionAccuracyCard({
     latestHolt && latestHolt.holtTargets.length
       ? Math.sign(latestHolt.holtTargets[latestHolt.holtTargets.length - 1].predicted - latestHolt.basePrice)
       : 0;
+  const dampedHoltSignalDir =
+    latestDampedHolt && latestDampedHolt.dampedHoltTargets.length
+      ? Math.sign(
+          latestDampedHolt.dampedHoltTargets[latestDampedHolt.dampedHoltTargets.length - 1].predicted -
+            latestDampedHolt.basePrice
+        )
+      : 0;
   const userSignalDir = activeUserPred ? Math.sign(activeUserPred.predicted - activeUserPred.basePrice) : 0;
 
   const weightedSum =
-    linearSignalDir * wLinear + holtSignalDir * wHolt + userSignalDir * (activeUserPred ? wUser : 0);
-  const totalW = wLinear + wHolt + (activeUserPred ? wUser : 0);
+    linearSignalDir * wLinear +
+    holtSignalDir * wHolt +
+    dampedHoltSignalDir * wDampedHolt +
+    userSignalDir * (activeUserPred ? wUser : 0);
+  const totalW = wLinear + wHolt + wDampedHolt + (activeUserPred ? wUser : 0);
   const consensusScore = totalW > 0 ? weightedSum / totalW : 0;
-  const hasAnySignal = linearSignalDir !== 0 || holtSignalDir !== 0 || (activeUserPred && userSignalDir !== 0);
+  const hasAnySignal =
+    linearSignalDir !== 0 || holtSignalDir !== 0 || dampedHoltSignalDir !== 0 || (activeUserPred && userSignalDir !== 0);
 
   // ---- 입력 폼 상태 ----
   const [priceInput, setPriceInput] = useState("");
@@ -1360,7 +1470,7 @@ function PredictionAccuracyCard({
       {hasAnySignal && (
         <div style={{ ...styles.posNote, marginBottom: 10, color: consensusScore >= 0 ? "#6FCB9F" : "#E2604F" }}>
           종합 판정 (성적 가중): {consensusScore >= 0.15 ? "상승 우세" : consensusScore <= -0.15 ? "하락 우세" : "혼조"} ·
-          가중치 = 선형 {wLinear.toFixed(1)} / 홀트 {wHolt.toFixed(1)}
+          가중치 = 선형 {wLinear.toFixed(1)} / 홀트 {wHolt.toFixed(1)} / 감쇠홀트 {wDampedHolt.toFixed(1)}
           {activeUserPred ? ` / 직접입력 ${wUser.toFixed(1)}` : ""} (지금까지 점수가 높을수록 발언권이 커짐)
         </div>
       )}
@@ -1368,6 +1478,7 @@ function PredictionAccuracyCard({
       <div style={{ display: "flex", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
         <MethodScoreBlock title="선형회귀 추세연장" color="#EDEAE3" m={linear} timeframe={timeframe} />
         <MethodScoreBlock title="홀트 이중지수평활" color="#F4A6C6" m={holt} timeframe={timeframe} />
+        <MethodScoreBlock title="감쇠홀트" color="#8AD1B5" m={dampedHolt} timeframe={timeframe} />
         <MethodScoreBlock title="내 직접 예측" color="#5B9BD5" m={user} timeframe={timeframe} />
       </div>
 
@@ -1474,7 +1585,14 @@ function PredictionAccuracyCard({
                 <td
                   style={{
                     ...styles.td,
-                    color: t.method === "홀트" ? "#F4A6C6" : t.method === "직접입력" ? "#5B9BD5" : "#EDEAE3",
+                    color:
+                      t.method === "홀트"
+                        ? "#F4A6C6"
+                        : t.method === "감쇠홀트"
+                        ? "#8AD1B5"
+                        : t.method === "직접입력"
+                        ? "#5B9BD5"
+                        : "#EDEAE3",
                   }}
                 >
                   {t.method}
