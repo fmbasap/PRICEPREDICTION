@@ -1104,7 +1104,7 @@ export default function CryptoTrendDashboard() {
               session={session}
             />
 
-            <LeaderboardPanel />
+            <LeaderboardPanel session={session} />
 
             <section style={styles.signalGrid}>
               <SignalCard
@@ -3639,8 +3639,8 @@ function CheckpointSummaryPanel() {
   );
 }
 
-function LeaderboardPanel() {
-  const [board, setBoard] = useState(null);
+function LeaderboardPanel({ session }) {
+  const [board, setBoard] = useState(null); // 전체 정렬된 배열(순위 계산용)
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -3680,8 +3680,7 @@ function LeaderboardPanel() {
           resolved_count: v.resolved,
           hit_count: v.hit,
         }))
-        .sort((a, b) => b.total_points - a.total_points)
-        .slice(0, 50);
+        .sort((a, b) => b.total_points - a.total_points);
 
       setBoard(rows);
     } catch (e) {
@@ -3695,6 +3694,69 @@ function LeaderboardPanel() {
     fetchBoard();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const MEDAL = { 0: { emoji: "🥇", bg: "linear-gradient(90deg, #7A5C1E, #4A3A12)", border: "#E8B93D" },
+                  1: { emoji: "🥈", bg: "linear-gradient(90deg, #5A6068, #383C42)", border: "#B9C0C9" },
+                  2: { emoji: "🥉", bg: "linear-gradient(90deg, #6B4326, #40281A)", border: "#D08A4E" } };
+
+  const topList = board ? board.slice(0, 20) : null;
+
+  // 이메일 앞 3자리로 "내가 랭킹의 어느 행인지" 근사 매칭 (완전히 정확하진 않을 수 있음)
+  const myPrefix = session?.user?.email ? session.user.email.slice(0, 3) + "***" : null;
+  const myRankIdx = myPrefix && board ? board.findIndex((r) => r.display_name === myPrefix) : -1;
+  const myInTop = myRankIdx >= 0 && myRankIdx < 20;
+  const myRow = myRankIdx >= 0 ? board[myRankIdx] : null;
+
+  const renderRow = (row, idx, isMe) => {
+    const medal = MEDAL[idx];
+    return (
+      <div
+        key={idx}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          padding: "10px 12px",
+          borderRadius: 10,
+          marginBottom: 6,
+          background: medal ? medal.bg : isMe ? "rgba(91,155,213,0.15)" : "rgba(255,255,255,0.02)",
+          border: medal ? `1px solid ${medal.border}` : isMe ? "1px solid #5B9BD5" : "1px solid transparent",
+        }}
+      >
+        <div
+          style={{
+            width: 26,
+            textAlign: "center",
+            fontSize: medal ? 18 : 13,
+            fontFamily: "IBM Plex Mono, monospace",
+            fontWeight: 700,
+            color: medal ? "#EDEAE3" : "#8B948E",
+            flexShrink: 0,
+          }}
+        >
+          {medal ? medal.emoji : idx + 1}
+        </div>
+        <div style={{ flex: 1, fontSize: 13, color: "#EDEAE3", fontWeight: isMe ? 700 : 500 }}>
+          {row.display_name}
+          {isMe && <span style={{ color: "#5B9BD5", fontSize: 10, marginLeft: 6 }}>(나)</span>}
+        </div>
+        <div
+          style={{
+            fontFamily: "IBM Plex Mono, monospace",
+            fontSize: 14,
+            fontWeight: 700,
+            color: row.total_points >= 0 ? "#6FCB9F" : "#E2604F",
+          }}
+        >
+          {row.total_points >= 0 ? "+" : ""}
+          {row.total_points}
+        </div>
+        <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: "#5B6660", width: 42, textAlign: "right" }}>
+          {row.hit_count}/{row.resolved_count}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <section style={styles.newsCard}>
@@ -3720,45 +3782,21 @@ function LeaderboardPanel() {
         </div>
       )}
 
-      {board && board.length > 0 && (
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              <th style={styles.th}>순위</th>
-              <th style={styles.th}>참여자</th>
-              <th style={{ ...styles.th, textAlign: "right" }}>점수</th>
-              <th style={{ ...styles.th, textAlign: "right" }}>적중/검증</th>
-            </tr>
-          </thead>
-          <tbody>
-            {board.map((row, i) => (
-              <tr key={i} style={i % 2 === 1 ? styles.trAlt : undefined}>
-                <td style={styles.td}>{i + 1}</td>
-                <td style={styles.td}>{row.display_name}</td>
-                <td
-                  style={{
-                    ...styles.td,
-                    textAlign: "right",
-                    color: row.total_points >= 0 ? "#6FCB9F" : "#E2604F",
-                    fontWeight: 600,
-                  }}
-                >
-                  {row.total_points >= 0 ? "+" : ""}
-                  {row.total_points}
-                </td>
-                <td style={{ ...styles.td, textAlign: "right" }}>
-                  {row.hit_count}/{row.resolved_count}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      {topList && topList.length > 0 && (
+        <div>{topList.map((row, i) => renderRow(row, i, myPrefix === row.display_name))}</div>
+      )}
+
+      {myRow && !myInTop && (
+        <>
+          <div style={{ textAlign: "center", color: "#5B6660", fontSize: 12, margin: "4px 0" }}>⋯</div>
+          {renderRow(myRow, myRankIdx, true)}
+        </>
       )}
 
       <div style={{ ...styles.posNote, marginTop: 10 }}>
         "내 직접 예측"에 로그인 후 등록한 예측만 랭킹에 집계됩니다. 참여자 이름은 이메일 앞 3자리만 표시됩니다
-        (예: abc***). 점수는 저장된 값이 아니라, 조회할 때마다 위 "예측 정확도 기록"과 똑같은 최신 규칙으로
-        다시 계산됩니다 — 그래서 규칙이 바뀌어도 개인 카드와 랭킹이 항상 일치합니다.
+        (예: abc***, 같은 앞 3자리를 쓰는 다른 사용자와는 구분이 안 될 수 있습니다). 점수는 저장된 값이 아니라,
+        조회할 때마다 위 "예측 정확도 기록"과 똑같은 최신 규칙으로 다시 계산됩니다.
       </div>
     </section>
   );
