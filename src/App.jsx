@@ -858,6 +858,42 @@ export default function CryptoTrendDashboard() {
               </table>
             </section>
 
+            <section style={styles.tableCard}>
+              <div style={styles.tableTitle}>홀트 예측 표 ({tfConf.forwardLabel})</div>
+              <table style={styles.table}>
+                <thead>
+                  <tr>
+                    <th style={styles.th}>시점</th>
+                    <th style={{ ...styles.th, textAlign: "right" }}>홀트 예측 가격</th>
+                    <th style={{ ...styles.th, textAlign: "right" }}>현재가 대비</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {analysis.chartData
+                    .filter((d) => d.holtProjection != null && d.price == null)
+                    .map((d, i) => {
+                      const pct = ((d.holtProjection - analysis.currentPrice) / analysis.currentPrice) * 100;
+                      return (
+                        <tr key={i} style={i % 2 === 1 ? styles.trAlt : undefined}>
+                          <td style={styles.td}>{d.date}</td>
+                          <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(d.holtProjection)}</td>
+                          <td
+                            style={{
+                              ...styles.td,
+                              textAlign: "right",
+                              color: pct >= 0 ? "#6FCB9F" : "#E2604F",
+                            }}
+                          >
+                            {pct >= 0 ? "+" : ""}
+                            {pct.toFixed(2)}%
+                          </td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+            </section>
+
             <PredictionAccuracyCard
               log={predLog}
               timeframe={timeframe}
