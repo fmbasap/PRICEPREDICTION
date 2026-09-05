@@ -723,13 +723,13 @@ export default function CryptoTrendDashboard() {
         for (const t of resolvedLog) {
           const prev = log.find((p) => p.id === t.id);
           if (t.resolved && (!prev || !prev.resolved)) {
-            const predictedDir = t.predicted - t.basePrice;
-            const actualDir = t.actual - t.basePrice;
-            const isFlat = isMeaninglessMove(predictedDir, t.basePrice) || isMeaninglessMove(actualDir, t.basePrice);
-            const isHit = !isFlat && Math.sign(predictedDir) === Math.sign(actualDir);
-            const horizonHours = Math.max(0.01, (t.targetTs - t.createdAt) / (60 * 60 * 1000));
-            const weight = getHorizonWeight(horizonHours);
-            const points = isFlat ? 0 : isHit ? weight : -7;
+            const { points } = computePredictionScore({
+              predicted: t.predicted,
+              actual: t.actual,
+              basePrice: t.basePrice,
+              createdAt: t.createdAt,
+              targetTs: t.targetTs,
+            });
             await supabase.rpc("resolve_my_prediction", { p_id: t.supabaseId, p_actual: t.actual, p_points: points });
           }
         }
@@ -1130,6 +1130,19 @@ function isMeaninglessMove(diff, basePrice) {
   return Math.abs(diff) / basePrice < 0.0005; // 0.05%
 }
 
+// 예측 하나(예측가/실제가/기준가/생성시각/목표시각)에 대해 최종 점수를 계산하는 단일 진실 공급원.
+// "예측 정확도 기록" 개인 카드와 "예측 랭킹"이 항상 똑같은 규칙으로 계산되도록, 채점 로직을 여기 한 곳에만 둡니다.
+function computePredictionScore({ predicted, actual, basePrice, createdAt, targetTs }) {
+  const predictedDir = predicted - basePrice;
+  const actualDir = actual - basePrice;
+  const isFlat = isMeaninglessMove(predictedDir, basePrice) || isMeaninglessMove(actualDir, basePrice);
+  const isHit = !isFlat && Math.sign(predictedDir) === Math.sign(actualDir);
+  const horizonHours = Math.max(0.01, (targetTs - createdAt) / (60 * 60 * 1000));
+  const weight = getHorizonWeight(horizonHours);
+  const points = isFlat ? 0 : isHit ? weight : -7;
+  return { isFlat, isHit, weight, points, horizonHours };
+}
+
 function getScenarioCheckpointWeight(cpDate, sortedCheckpointDates) {
   const idx = sortedCheckpointDates.indexOf(cpDate);
   return idx >= 0 ? idx + 1 : 1;
@@ -1184,13 +1197,13 @@ function scoreMethod(log, key) {
   const bias = errors.length ? errors.reduce((a, b) => a + b, 0) / errors.length : null;
 
   const scored = resolved.map((t) => {
-    const horizonHours = Math.max(0.01, (t.ts - t.createdAt) / (60 * 60 * 1000));
-    const predictedDir = t.predicted - t.basePrice;
-    const actualDir = t.actual - t.basePrice;
-    const isFlat = isMeaninglessMove(predictedDir, t.basePrice) || isMeaninglessMove(actualDir, t.basePrice);
-    const isHit = !isFlat && Math.sign(predictedDir) === Math.sign(actualDir);
-    const weight = getHorizonWeight(horizonHours);
-    const points = isFlat ? 0 : isHit ? weight : -7;
+    const { isFlat, isHit, weight, points, horizonHours } = computePredictionScore({
+      predicted: t.predicted,
+      actual: t.actual,
+      basePrice: t.basePrice,
+      createdAt: t.createdAt,
+      targetTs: t.ts,
+    });
     return { ...t, horizonHours, isHit, isFlat, weight, points };
   });
   const judged = scored.filter((s) => !s.isFlat);
@@ -1213,13 +1226,13 @@ function scoreUserPredictions(userPredLog) {
   const bias = errors.length ? errors.reduce((a, b) => a + b, 0) / errors.length : null;
 
   const scored = resolved.map((t) => {
-    const horizonHours = Math.max(0.01, (t.targetTs - t.createdAt) / (60 * 60 * 1000));
-    const predictedDir = t.predicted - t.basePrice;
-    const actualDir = t.actual - t.basePrice;
-    const isFlat = isMeaninglessMove(predictedDir, t.basePrice) || isMeaninglessMove(actualDir, t.basePrice);
-    const isHit = !isFlat && Math.sign(predictedDir) === Math.sign(actualDir);
-    const weight = getHorizonWeight(horizonHours);
-    const points = isFlat ? 0 : isHit ? weight : -7;
+    const { isFlat, isHit, weight, points, horizonHours } = computePredictionScore({
+      predicted: t.predicted,
+      actual: t.actual,
+      basePrice: t.basePrice,
+      createdAt: t.createdAt,
+      targetTs: t.targetTs,
+    });
     return { ...t, horizonHours, isHit, isFlat, weight, points };
   });
   const judged = scored.filter((s) => !s.isFlat);
@@ -3516,9 +3529,38 @@ function LeaderboardPanel() {
     setLoading(true);
     setError(null);
     try {
-      const { data, error } = await supabase.rpc("get_leaderboard");
+      const { data, error } = await supabase.rpc("get_all_resolved_predictions");
       if (error) throw error;
-      setBoard(data || []);
+
+      // 항상 "지금 이 순간의 채점 규칙"으로 다시 계산 (개인 카드와 항상 같은 값이 나오도록)
+      const byName = new Map();
+      (data || []).forEach((row) => {
+        const { isFlat, isHit, points } = computePredictionScore({
+          predicted: Number(row.predicted),
+          actual: Number(row.actual),
+          basePrice: Number(row.base_price),
+          createdAt: new Date(row.created_at).getTime(),
+          targetTs: new Date(row.target_ts).getTime(),
+        });
+        if (isFlat) return; // 횡보는 랭킹 집계에서도 제외
+        const cur = byName.get(row.display_name) || { total: 0, hit: 0, resolved: 0 };
+        cur.total += points;
+        cur.resolved += 1;
+        if (isHit) cur.hit += 1;
+        byName.set(row.display_name, cur);
+      });
+
+      const rows = Array.from(byName.entries())
+        .map(([display_name, v]) => ({
+          display_name,
+          total_points: v.total,
+          resolved_count: v.resolved,
+          hit_count: v.hit,
+        }))
+        .sort((a, b) => b.total_points - a.total_points)
+        .slice(0, 50);
+
+      setBoard(rows);
     } catch (e) {
       setError(e.message || "랭킹을 불러오지 못했습니다");
     } finally {
@@ -3592,7 +3634,8 @@ function LeaderboardPanel() {
 
       <div style={{ ...styles.posNote, marginTop: 10 }}>
         "내 직접 예측"에 로그인 후 등록한 예측만 랭킹에 집계됩니다. 참여자 이름은 이메일 앞 3자리만 표시됩니다
-        (예: abc***). 점수 규칙은 위 "예측 정확도 기록"과 동일합니다.
+        (예: abc***). 점수는 저장된 값이 아니라, 조회할 때마다 위 "예측 정확도 기록"과 똑같은 최신 규칙으로
+        다시 계산됩니다 — 그래서 규칙이 바뀌어도 개인 카드와 랭킹이 항상 일치합니다.
       </div>
     </section>
   );
