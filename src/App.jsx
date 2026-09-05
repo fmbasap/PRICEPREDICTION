@@ -240,6 +240,14 @@ function fmtPrice(v) {
   return `$${v.toFixed(2)}`;
 }
 
+// 예측 정확도 표처럼 "왜 이 방향으로 판정됐는지"를 눈으로 확인해야 하는 곳에서 쓰는 정밀 표시
+// (1달러 이상이어도 소수점을 뭉개지 않고 4자리까지 보여줌)
+function fmtPricePrecise(v) {
+  if (v == null) return "-";
+  if (v < 0.01) return `$${v.toFixed(6)}`;
+  return `$${v.toFixed(4)}`;
+}
+
 function fmtLabel(ts, mode) {
   const d = new Date(ts);
   if (mode === "hourly") {
@@ -717,7 +725,7 @@ export default function CryptoTrendDashboard() {
           if (t.resolved && (!prev || !prev.resolved)) {
             const predictedDir = t.predicted - t.basePrice;
             const actualDir = t.actual - t.basePrice;
-            const isFlat = Math.abs(predictedDir) < 1e-9 || Math.abs(actualDir) < 1e-9;
+            const isFlat = isMeaninglessMove(predictedDir, t.basePrice) || isMeaninglessMove(actualDir, t.basePrice);
             const isHit = !isFlat && Math.sign(predictedDir) === Math.sign(actualDir);
             const horizonHours = Math.max(0.01, (t.targetTs - t.createdAt) / (60 * 60 * 1000));
             const weight = getHorizonWeight(horizonHours);
@@ -1114,6 +1122,14 @@ function getHorizonWeight(hours) {
 
 // 시나리오 대결 전용 가중치 - "몇 번째(1개월/2개월/3개월...) 체크포인트인지"를 그대로 점수로 씀
 // (1번째 체크포인트=1점, 2번째=2점, 3번째=3점...). 정렬된 체크포인트 목록에서의 순번(1부터)입니다.
+// 예측/실제 방향이 "의미 있는 움직임"인지 판정. 완전히 0일 때만이 아니라,
+// 기준가 대비 0.05% 미만의 미세한 차이도 횡보(사실상 노이즈)로 간주해서 판정에서 제외합니다.
+// (화면엔 소수점을 반올림해서 보여주다 보니 "똑같아 보이는데 승부가 갈리는" 혼란을 줄이기 위함)
+function isMeaninglessMove(diff, basePrice) {
+  if (!basePrice) return Math.abs(diff) < 1e-9;
+  return Math.abs(diff) / basePrice < 0.0005; // 0.05%
+}
+
 function getScenarioCheckpointWeight(cpDate, sortedCheckpointDates) {
   const idx = sortedCheckpointDates.indexOf(cpDate);
   return idx >= 0 ? idx + 1 : 1;
@@ -1171,7 +1187,7 @@ function scoreMethod(log, key) {
     const horizonHours = Math.max(0.01, (t.ts - t.createdAt) / (60 * 60 * 1000));
     const predictedDir = t.predicted - t.basePrice;
     const actualDir = t.actual - t.basePrice;
-    const isFlat = Math.abs(predictedDir) < 1e-9 || Math.abs(actualDir) < 1e-9;
+    const isFlat = isMeaninglessMove(predictedDir, t.basePrice) || isMeaninglessMove(actualDir, t.basePrice);
     const isHit = !isFlat && Math.sign(predictedDir) === Math.sign(actualDir);
     const weight = getHorizonWeight(horizonHours);
     const points = isFlat ? 0 : isHit ? weight : -7;
@@ -1200,7 +1216,7 @@ function scoreUserPredictions(userPredLog) {
     const horizonHours = Math.max(0.01, (t.targetTs - t.createdAt) / (60 * 60 * 1000));
     const predictedDir = t.predicted - t.basePrice;
     const actualDir = t.actual - t.basePrice;
-    const isFlat = Math.abs(predictedDir) < 1e-9 || Math.abs(actualDir) < 1e-9;
+    const isFlat = isMeaninglessMove(predictedDir, t.basePrice) || isMeaninglessMove(actualDir, t.basePrice);
     const isHit = !isFlat && Math.sign(predictedDir) === Math.sign(actualDir);
     const weight = getHorizonWeight(horizonHours);
     const points = isFlat ? 0 : isHit ? weight : -7;
@@ -1451,8 +1467,8 @@ function PredictionAccuracyCard({
                   {t.method}
                 </td>
                 <td style={styles.td}>{fmtLabel(t.ts, timeframe)}</td>
-                <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(t.predicted)}</td>
-                <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(t.actual)}</td>
+                <td style={{ ...styles.td, textAlign: "right" }}>{fmtPricePrecise(t.predicted)}</td>
+                <td style={{ ...styles.td, textAlign: "right" }}>{fmtPricePrecise(t.actual)}</td>
                 <td
                   style={{
                     ...styles.td,
@@ -1474,9 +1490,10 @@ function PredictionAccuracyCard({
         예측이 여러 번 쌓이면(예: 시간별 10분마다 재저장), 채점 시엔 그중 가장 나중에 만들어진 예측 하나만
         대표로 씁니다 (중복 과채점 방지). 각 방법은 자기 예상 변화율이{" "}
         {timeframe === "hourly" ? "0.3%" : "1.0%"} 미만으로 방향이 애매하면 그 방법만 독립적으로 건너뜁니다
-        (선형회귀는 저장되고 홀트는 안 될 수도, 반대도 가능). 점수 규칙은 "시간 = 점수"입니다 (1h:1점 · 2h:2점 ·
-        3h:3점 ·... 상한선 없음) · 오답 -7점입니다. "종합 판정"은 세 방법의 지금까지 누적 점수를 가중치로 써서
-        현재 진행 중인 방향을 합산한 참고 지표입니다. 이 기기(브라우저)에만 저장됩니다.
+        (선형회귀는 저장되고 홀트는 안 될 수도, 반대도 가능). 예측가·실제가가 기준가 대비 0.05% 미만으로만
+        차이 나면 "횡보"로 보고 승부 판정에서 제외합니다 (표에는 소수점 4자리까지 정밀 표시). 점수 규칙은
+        "시간 = 점수"입니다 (1h:1점 · 2h:2점 · 3h:3점 ·... 상한선 없음) · 오답 -7점입니다. "종합 판정"은 세
+        방법의 지금까지 누적 점수를 가중치로 써서 현재 진행 중인 방향을 합산한 참고 지표입니다.
       </div>
     </section>
   );
