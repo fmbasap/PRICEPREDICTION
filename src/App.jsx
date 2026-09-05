@@ -1106,21 +1106,38 @@ export default function CryptoTrendDashboard() {
   );
 }
 
-// 시간대(horizon)별 가중치 - 멀리 내다본 예측일수록 맞히기 어려우므로 가중치를 높게 줌
-// 시간대(horizon)별 가중치
-// 1h=1점, 2h=2점, 3h=3점까지는 그대로. 그 이후로는 시간이 2배가 될 때마다 +1점씩 늘어나서
-// (6h=4, 12h=5, 24h=6, 48h=7, 96h=8, 192h=9, 384h=10, ...) 최대 30점까지 증가합니다.
+// 시간대(horizon)별 가중치 - "시간 = 점수" 그대로 비례 (1h=1점, 2h=2점, 3h=3점, 4h=4점 ...)
+// 상한선 없이 시간이 늘어나는 만큼 그대로 점수도 커집니다.
 function getHorizonWeight(hours) {
-  if (hours <= 1) return 1;
-  if (hours <= 2) return 2;
-  if (hours <= 3) return 3;
-  let h = 3;
-  let point = 3;
-  while (hours > h && point < 30) {
-    h *= 2;
-    point += 1;
+  return Math.max(1, Math.round(hours));
+}
+
+// 시나리오 대결 전용 가중치 - "몇 번째(1개월/2개월/3개월...) 체크포인트인지"를 그대로 점수로 씀
+// (1번째 체크포인트=1점, 2번째=2점, 3번째=3점...). 정렬된 체크포인트 목록에서의 순번(1부터)입니다.
+function getScenarioCheckpointWeight(cpDate, sortedCheckpointDates) {
+  const idx = sortedCheckpointDates.indexOf(cpDate);
+  return idx >= 0 ? idx + 1 : 1;
+}
+
+// 시나리오 대결 점수를 "빨간 동전" 아이콘으로 시각화 (양수만; 음수는 잃은 것이라 동전으로 안 그림)
+function RedCoins({ n, size = 13 }) {
+  if (n == null) return null;
+  if (n <= 0) {
+    return (
+      <span style={{ color: "#E2604F", fontWeight: 600, fontFamily: "IBM Plex Mono, monospace" }}>{n}</span>
+    );
   }
-  return Math.min(point, 30);
+  const capped = Math.min(n, 10);
+  return (
+    <span>
+      <span style={{ fontSize: size, letterSpacing: 1 }}>{"🔴".repeat(capped)}</span>
+      {n > 10 && (
+        <span style={{ color: "#E8A33D", fontWeight: 600, fontFamily: "IBM Plex Mono, monospace", marginLeft: 4 }}>
+          ×{n}
+        </span>
+      )}
+    </span>
+  );
 }
 
 // 하나의 target 배열(선형 또는 홀트)에 대해 MAPE/편향/자기강화 점수를 계산
@@ -1457,8 +1474,8 @@ function PredictionAccuracyCard({
         예측이 여러 번 쌓이면(예: 시간별 10분마다 재저장), 채점 시엔 그중 가장 나중에 만들어진 예측 하나만
         대표로 씁니다 (중복 과채점 방지). 각 방법은 자기 예상 변화율이{" "}
         {timeframe === "hourly" ? "0.3%" : "1.0%"} 미만으로 방향이 애매하면 그 방법만 독립적으로 건너뜁니다
-        (선형회귀는 저장되고 홀트는 안 될 수도, 반대도 가능). 점수 규칙은 1h:1점 · 2h:2점 · 3h:3점, 이후 2배가
-        될 때마다 +1점(최대 30점) · 오답 -7점입니다. "종합 판정"은 세 방법의 지금까지 누적 점수를 가중치로 써서
+        (선형회귀는 저장되고 홀트는 안 될 수도, 반대도 가능). 점수 규칙은 "시간 = 점수"입니다 (1h:1점 · 2h:2점 ·
+        3h:3점 ·... 상한선 없음) · 오답 -7점입니다. "종합 판정"은 세 방법의 지금까지 누적 점수를 가중치로 써서
         현재 진행 중인 방향을 합산한 참고 지표입니다. 이 기기(브라우저)에만 저장됩니다.
       </div>
     </section>
@@ -3093,10 +3110,10 @@ function ScenarioBattlePanel() {
     return errors.reduce((a, b) => a + b, 0) / errors.length;
   };
 
-  // ---- 시간대 가중 자기강화 점수 (예측 정확도 기록과 같은 룰) ----
-  // "예측한 시점" = SCENARIO_BASELINE_DATE, 거기서부터 각 체크포인트까지의 경과시간으로 가중치를 매김.
-  // 코인별로 방향(상승/하락) 적중 여부를 판정해서, 적중이면 그 시간대 가중치, 틀리면 -7점.
-  const baselineMs = new Date(SCENARIO_BASELINE_DATE + "T00:00:00Z").getTime();
+  // ---- 시나리오 대결 자기강화 점수 ----
+  // "예측한 시점" = SCENARIO_BASELINE_DATE. 체크포인트가 몇 번째(1,2,3,4...)인지를 그대로 점수로 씀
+  // (1번째=1점, 2번째=2점, 3번째=3점...). 코인별로 방향(상승/하락) 적중 여부를 판정해서,
+  // 적중이면 그 순번만큼 +점, 틀리면 같은 숫자만큼 -점.
   const scenarioScores = useMemo(() => {
     const scores = {};
     Object.keys(SCENARIOS).forEach((sKey) => {
@@ -3104,11 +3121,7 @@ function ScenarioBattlePanel() {
       let hit = 0;
       let miss = 0;
       passedCheckpoints.forEach((cpDate) => {
-        const horizonHours = Math.max(
-          0.01,
-          (new Date(cpDate + "T00:00:00Z").getTime() - baselineMs) / (60 * 60 * 1000)
-        );
-        const weight = getHorizonWeight(horizonHours);
+        const weight = getScenarioCheckpointWeight(cpDate, checkpointDates);
         Object.entries(SCENARIO_COINS).forEach(([coinKey, coinMeta]) => {
           const actual = actuals[`${coinKey}:${cpDate}`];
           if (actual == null) return;
@@ -3116,7 +3129,7 @@ function ScenarioBattlePanel() {
           const actualPct = ((actual - coinMeta.baseline) / coinMeta.baseline) * 100;
           if (Math.abs(predictedPct) < 1e-9 || Math.abs(actualPct) < 1e-9) return; // 횡보는 판정 제외
           const isHit = Math.sign(predictedPct) === Math.sign(actualPct);
-          total += isHit ? weight : -7;
+          total += isHit ? weight : -weight;
           if (isHit) hit += 1;
           else miss += 1;
         });
@@ -3124,7 +3137,7 @@ function ScenarioBattlePanel() {
       scores[sKey] = { total, hit, miss };
     });
     return scores;
-  }, [passedCheckpoints, actuals, baselineMs]);
+  }, [passedCheckpoints, actuals, checkpointDates]);
 
   // ---- 자기강화 블렌드 예측 ----
   // 지금까지 지난 체크포인트들의 평균 오차로 시나리오별 가중치를 매기고(오차가 작을수록 가중치 큼),
@@ -3251,19 +3264,13 @@ function ScenarioBattlePanel() {
 
       {passedCheckpoints.length > 0 && (
         <div style={{ marginTop: 16, paddingTop: 14, borderTop: "1px solid #232B27" }}>
-          <div style={styles.tableTitle}>시간대 가중 점수 (예측 정확도 기록과 같은 룰)</div>
+          <div style={styles.tableTitle}>체크포인트 순번 점수 (빨간 동전)</div>
           <div style={styles.posGrid}>
             {Object.entries(SCENARIOS).map(([key, s]) => (
               <div key={key}>
                 <div style={{ ...styles.posLabel, color: s.color }}>{s.label.split(" ")[0]}</div>
-                <div
-                  style={{
-                    ...styles.posValue,
-                    color: scenarioScores[key].total >= 0 ? "#6FCB9F" : "#E2604F",
-                  }}
-                >
-                  {scenarioScores[key].total >= 0 ? "+" : ""}
-                  {scenarioScores[key].total}점
+                <div style={{ ...styles.posValue, display: "flex", alignItems: "center" }}>
+                  <RedCoins n={scenarioScores[key].total} size={16} />
                 </div>
                 <div style={styles.posSub}>
                   적중 {scenarioScores[key].hit}건 / 미적중 {scenarioScores[key].miss}건
@@ -3272,9 +3279,9 @@ function ScenarioBattlePanel() {
             ))}
           </div>
           <div style={{ ...styles.posNote, marginTop: 8 }}>
-            {SCENARIO_BASELINE_DATE}(예측 시점) 기준 각 체크포인트까지의 경과시간에 시간대 가중치(1h:1점 ·
-            2h:2점 · 3h:3점, 이후 2배가 될 때마다 +1점, 최대 30점)를 적용합니다. 코인·체크포인트별로
-            방향(상승/하락) 적중 시 가중치만큼 +점, 틀리면 -7점입니다.
+            {SCENARIO_BASELINE_DATE}(예측 시점) 기준으로, 체크포인트가 몇 번째인지(1번째=1점, 2번째=2점,
+            3번째=3점, 4번째=4점...)를 그대로 점수로 씁니다. 코인·체크포인트별로 방향(상승/하락) 적중 시
+            그 순번만큼 +점, 틀리면 같은 숫자만큼 -점입니다.
           </div>
         </div>
       )}
@@ -3357,7 +3364,6 @@ function CheckpointSummaryPanel() {
   const checkpointDates = Object.keys(SCENARIOS.kim.checkpoints).sort();
   const today = new Date();
   const passedCheckpoints = checkpointDates.filter((d) => new Date(d + "T23:59:59") <= today);
-  const baselineMs = new Date(SCENARIO_BASELINE_DATE + "T00:00:00Z").getTime();
 
   const fetchActuals = async () => {
     setLoading(true);
@@ -3386,11 +3392,7 @@ function CheckpointSummaryPanel() {
 
   const rows = [];
   passedCheckpoints.forEach((cpDate) => {
-    const horizonHours = Math.max(
-      0.01,
-      (new Date(cpDate + "T00:00:00Z").getTime() - baselineMs) / (60 * 60 * 1000)
-    );
-    const weight = getHorizonWeight(horizonHours);
+    const weight = getScenarioCheckpointWeight(cpDate, checkpointDates);
     Object.entries(SCENARIO_COINS).forEach(([coinKey, coinMeta]) => {
       const actual = actuals[`${coinKey}:${cpDate}`];
       if (actual == null) return;
@@ -3403,7 +3405,7 @@ function CheckpointSummaryPanel() {
           Math.abs(predictedPct) >= 1e-9 &&
           Math.abs(actualPct) >= 1e-9 &&
           Math.sign(predictedPct) === Math.sign(actualPct);
-        const points = Math.abs(predictedPct) < 1e-9 || Math.abs(actualPct) < 1e-9 ? null : isHit ? weight : -7;
+        const points = Math.abs(predictedPct) < 1e-9 || Math.abs(actualPct) < 1e-9 ? null : isHit ? weight : -weight;
         return { key: sKey, label: s.label.split(" ")[0], color: s.color, target, errPct, isHit, points };
       });
       rows.push({ cpDate, coinKey, actual, actualPct, weight, perScenario });
@@ -3464,9 +3466,11 @@ function CheckpointSummaryPanel() {
                         {s.points == null ? (
                           <span style={{ color: "#5B6660" }}>횡보</span>
                         ) : (
-                          <span style={{ color: s.isHit ? "#6FCB9F" : "#E2604F" }}>
-                            {s.isHit ? "적중" : "빗나감"} ({s.points >= 0 ? "+" : ""}
-                            {s.points})
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                            <span style={{ color: s.isHit ? "#6FCB9F" : "#E2604F", fontSize: 10 }}>
+                              {s.isHit ? "적중" : "빗나감"}
+                            </span>
+                            <RedCoins n={s.points} size={12} />
                           </span>
                         )}
                       </td>
