@@ -263,6 +263,52 @@ function savePredLog(asset, timeframe, log) {
   }
 }
 
+// ---- 사용자 직접 예측 (localStorage에 저장, 자산 단위로 저장하고 시간대 무관하게 채점) ----
+function userPredKey(asset) {
+  return `userpred_v1_${asset}`;
+}
+
+function loadUserPredLog(asset) {
+  try {
+    const raw = localStorage.getItem(userPredKey(asset));
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveUserPredLog(asset, log) {
+  try {
+    localStorage.setItem(userPredKey(asset), JSON.stringify(log.slice(-50)));
+  } catch {
+    // 무시
+  }
+}
+
+function resolveUserPredLog(log, rawPrices, toleranceMs) {
+  if (!rawPrices || rawPrices.length === 0) return { log, changed: false };
+  let changed = false;
+  const now = Date.now();
+  const nextLog = log.map((t) => {
+    if (t.resolved || t.targetTs > now) return t;
+    let nearestPrice = null;
+    let nearestDiff = Infinity;
+    for (const [ts, price] of rawPrices) {
+      const diff = Math.abs(ts - t.targetTs);
+      if (diff < nearestDiff) {
+        nearestDiff = diff;
+        nearestPrice = price;
+      }
+    }
+    if (nearestPrice != null && nearestDiff <= toleranceMs) {
+      changed = true;
+      return { ...t, actual: nearestPrice, resolved: true };
+    }
+    return t;
+  });
+  return { log: nextLog, changed };
+}
+
 // 지나간 목표 시점에 대해, 그 시점에 가장 가까운 실제 가격을 찾아 오차를 채워 넣는다
 function resolvePredLog(log, rawPrices, toleranceMs) {
   if (!rawPrices || rawPrices.length === 0) return { log, changed: false };
@@ -614,6 +660,40 @@ export default function CryptoTrendDashboard() {
     setPredLog(log);
   }, [analysis, cache, asset, timeframe, lastUpdated, tfConf]);
 
+  // ---- 사용자 직접 예측: 지나간 목표시점 자동 검증 ----
+  const [userPredLog, setUserPredLog] = useState([]);
+
+  useEffect(() => {
+    if (!cache[asset]) return;
+    let log = loadUserPredLog(asset);
+    // 사용자가 자유롭게 목표시점을 고르므로, 넉넉하게(12시간) 허용오차를 둠
+    const { log: resolvedLog, changed } = resolveUserPredLog(log, cache[asset], 12 * 60 * 60 * 1000);
+    if (changed) saveUserPredLog(asset, resolvedLog);
+    setUserPredLog(resolvedLog);
+  }, [cache, asset]);
+
+  const addUserPrediction = (predictedPrice, targetDateTimeLocal) => {
+    if (!analysis) return { ok: false, message: "현재가를 아직 못 불러왔습니다" };
+    const targetTs = new Date(targetDateTimeLocal).getTime();
+    if (!targetTs || Number.isNaN(targetTs)) return { ok: false, message: "목표 시점을 확인해주세요" };
+    if (targetTs <= Date.now()) return { ok: false, message: "목표 시점은 미래여야 합니다" };
+    if (!predictedPrice || Number.isNaN(predictedPrice)) return { ok: false, message: "예측 가격을 입력해주세요" };
+
+    const entry = {
+      id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      createdAt: Date.now(),
+      targetTs,
+      basePrice: analysis.currentPrice,
+      predicted: predictedPrice,
+      actual: null,
+      resolved: false,
+    };
+    const next = [...userPredLog, entry];
+    saveUserPredLog(asset, next);
+    setUserPredLog(next);
+    return { ok: true };
+  };
+
   return (
     <div style={styles.page}>
       <style>{FONT_IMPORT}</style>
@@ -778,7 +858,13 @@ export default function CryptoTrendDashboard() {
               </table>
             </section>
 
-            <PredictionAccuracyCard log={predLog} timeframe={timeframe} />
+            <PredictionAccuracyCard
+              log={predLog}
+              timeframe={timeframe}
+              userPredLog={userPredLog}
+              onAddUserPrediction={addUserPrediction}
+              currentPrice={analysis.currentPrice}
+            />
 
             <section style={styles.signalGrid}>
               <SignalCard
@@ -926,6 +1012,34 @@ function scoreMethod(log, key) {
   return { resolved, pendingCount, mape, bias, scored, judged, totalScore, hitCount, missCount, hitRate };
 }
 
+// 사용자 직접 예측(평평한 배열, ts 대신 targetTs)용 채점 - 로직은 scoreMethod와 동일
+function scoreUserPredictions(userPredLog) {
+  const resolved = userPredLog.filter((t) => t.resolved).map((t) => ({ ...t, ts: t.targetTs }));
+  const pendingCount = userPredLog.filter((t) => !t.resolved).length;
+
+  const errors = resolved.map((t) => ((t.actual - t.predicted) / t.predicted) * 100);
+  const mape = errors.length ? errors.reduce((a, b) => a + Math.abs(b), 0) / errors.length : null;
+  const bias = errors.length ? errors.reduce((a, b) => a + b, 0) / errors.length : null;
+
+  const scored = resolved.map((t) => {
+    const horizonHours = Math.max(0.01, (t.targetTs - t.createdAt) / (60 * 60 * 1000));
+    const predictedDir = t.predicted - t.basePrice;
+    const actualDir = t.actual - t.basePrice;
+    const isFlat = Math.abs(predictedDir) < 1e-9 || Math.abs(actualDir) < 1e-9;
+    const isHit = !isFlat && Math.sign(predictedDir) === Math.sign(actualDir);
+    const weight = getHorizonWeight(horizonHours);
+    const points = isFlat ? 0 : isHit ? weight : -7;
+    return { ...t, horizonHours, isHit, isFlat, weight, points };
+  });
+  const judged = scored.filter((s) => !s.isFlat);
+  const totalScore = judged.reduce((a, b) => a + b.points, 0);
+  const hitCount = judged.filter((s) => s.isHit).length;
+  const missCount = judged.length - hitCount;
+  const hitRate = judged.length ? (hitCount / judged.length) * 100 : null;
+
+  return { resolved, pendingCount, mape, bias, scored, judged, totalScore, hitCount, missCount, hitRate };
+}
+
 function MethodScoreBlock({ title, color, m, timeframe }) {
   return (
     <div style={{ flex: 1, minWidth: 0 }}>
@@ -954,22 +1068,111 @@ function MethodScoreBlock({ title, color, m, timeframe }) {
   );
 }
 
-function PredictionAccuracyCard({ log, timeframe }) {
+function PredictionAccuracyCard({ log, timeframe, userPredLog, onAddUserPrediction, currentPrice }) {
   const linear = scoreMethod(log, "targets");
   const holt = scoreMethod(log, "holtTargets");
-  const recentAll = [...linear.scored.map((s) => ({ ...s, method: "선형" })), ...holt.scored.map((s) => ({ ...s, method: "홀트" }))]
+  const user = scoreUserPredictions(userPredLog || []);
+
+  const recentAll = [
+    ...linear.scored.map((s) => ({ ...s, method: "선형" })),
+    ...holt.scored.map((s) => ({ ...s, method: "홀트" })),
+    ...user.scored.map((s) => ({ ...s, method: "직접입력" })),
+  ]
     .sort((a, b) => b.ts - a.ts)
     .slice(0, 8);
+
+  // ---- 종합 판정: 세 방법의 지금까지 성적(점수)을 가중치 삼아 현재 진행 중인 방향을 합산 ----
+  const scoreWeight = (total) => Math.max(0, total) + 0.5; // 점수가 마이너스여도 최소한의 발언권은 남겨둠
+  const wLinear = scoreWeight(linear.totalScore);
+  const wHolt = scoreWeight(holt.totalScore);
+  // 사용자의 "현재 유효한(아직 안 지난)" 가장 최근 예측 하나를 종합 판정에 반영
+  const activeUserPred = [...(userPredLog || [])]
+    .filter((t) => !t.resolved && t.targetTs > Date.now())
+    .sort((a, b) => b.createdAt - a.createdAt)[0];
+  const wUser = scoreWeight(user.totalScore);
+
+  // 종합 판정은 "지금 이 순간의 방향 신호"가 필요하므로, 각 방법의 마지막 저장된 예측(미확정 포함) 중 최신 걸 씀
+  const latestLinear = [...log].reverse().find((b) => (b.targets || []).length > 0);
+  const latestHolt = [...log].reverse().find((b) => (b.holtTargets || []).length > 0);
+  const linearSignalDir =
+    latestLinear && latestLinear.targets.length
+      ? Math.sign(latestLinear.targets[latestLinear.targets.length - 1].predicted - latestLinear.basePrice)
+      : 0;
+  const holtSignalDir =
+    latestHolt && latestHolt.holtTargets.length
+      ? Math.sign(latestHolt.holtTargets[latestHolt.holtTargets.length - 1].predicted - latestHolt.basePrice)
+      : 0;
+  const userSignalDir = activeUserPred ? Math.sign(activeUserPred.predicted - activeUserPred.basePrice) : 0;
+
+  const weightedSum =
+    linearSignalDir * wLinear + holtSignalDir * wHolt + userSignalDir * (activeUserPred ? wUser : 0);
+  const totalW = wLinear + wHolt + (activeUserPred ? wUser : 0);
+  const consensusScore = totalW > 0 ? weightedSum / totalW : 0;
+  const hasAnySignal = linearSignalDir !== 0 || holtSignalDir !== 0 || (activeUserPred && userSignalDir !== 0);
+
+  // ---- 입력 폼 상태 ----
+  const [priceInput, setPriceInput] = useState("");
+  const [timeInput, setTimeInput] = useState("");
+  const [formError, setFormError] = useState(null);
+  const [formSuccess, setFormSuccess] = useState(false);
+
+  const submitPrediction = () => {
+    setFormError(null);
+    setFormSuccess(false);
+    const price = parseFloat(priceInput);
+    const result = onAddUserPrediction(price, timeInput);
+    if (!result.ok) {
+      setFormError(result.message);
+    } else {
+      setFormSuccess(true);
+      setPriceInput("");
+      setTimeInput("");
+    }
+  };
 
   return (
     <section style={styles.newsCard}>
       <div style={styles.newsHeader}>
-        <div style={styles.tableTitle}>예측 정확도 기록 (선형회귀 vs 홀트, 각각 채점)</div>
+        <div style={styles.tableTitle}>예측 정확도 기록 (선형회귀 · 홀트 · 직접입력)</div>
       </div>
 
-      <div style={{ display: "flex", gap: 16, marginBottom: 14 }}>
+      {hasAnySignal && (
+        <div style={{ ...styles.posNote, marginBottom: 10, color: consensusScore >= 0 ? "#6FCB9F" : "#E2604F" }}>
+          종합 판정 (성적 가중): {consensusScore >= 0.15 ? "상승 우세" : consensusScore <= -0.15 ? "하락 우세" : "혼조"} ·
+          가중치 = 선형 {wLinear.toFixed(1)} / 홀트 {wHolt.toFixed(1)}
+          {activeUserPred ? ` / 직접입력 ${wUser.toFixed(1)}` : ""} (지금까지 점수가 높을수록 발언권이 커짐)
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 12, marginBottom: 14, flexWrap: "wrap" }}>
         <MethodScoreBlock title="선형회귀 추세연장" color="#EDEAE3" m={linear} timeframe={timeframe} />
         <MethodScoreBlock title="홀트 이중지수평활" color="#F4A6C6" m={holt} timeframe={timeframe} />
+        <MethodScoreBlock title="내 직접 예측" color="#5B9BD5" m={user} timeframe={timeframe} />
+      </div>
+
+      <div style={{ borderTop: "1px solid #232B27", paddingTop: 12, marginBottom: 12 }}>
+        <div style={{ ...styles.posLabel, marginBottom: 8 }}>내 예측 등록하기</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+          <input
+            type="number"
+            step="any"
+            placeholder={currentPrice ? `예: ${currentPrice.toFixed(4)}` : "예측 가격"}
+            value={priceInput}
+            onChange={(e) => setPriceInput(e.target.value)}
+            style={{ ...styles.modalInput, marginBottom: 0, flex: "1 1 140px" }}
+          />
+          <input
+            type="datetime-local"
+            value={timeInput}
+            onChange={(e) => setTimeInput(e.target.value)}
+            style={{ ...styles.modalInput, marginBottom: 0, flex: "1 1 180px" }}
+          />
+        </div>
+        <button onClick={submitPrediction} style={styles.accountBtn}>
+          예측 등록
+        </button>
+        {formError && <div style={{ ...styles.posNote, color: "#E2604F", marginTop: 6 }}>{formError}</div>}
+        {formSuccess && <div style={{ ...styles.posNote, color: "#6FCB9F", marginTop: 6 }}>등록됐습니다. 목표 시점이 지나면 자동으로 채점됩니다.</div>}
       </div>
 
       {recentAll.length === 0 ? (
@@ -991,7 +1194,14 @@ function PredictionAccuracyCard({ log, timeframe }) {
           <tbody>
             {recentAll.map((t, i) => (
               <tr key={i} style={i % 2 === 1 ? styles.trAlt : undefined}>
-                <td style={{ ...styles.td, color: t.method === "홀트" ? "#F4A6C6" : "#EDEAE3" }}>{t.method}</td>
+                <td
+                  style={{
+                    ...styles.td,
+                    color: t.method === "홀트" ? "#F4A6C6" : t.method === "직접입력" ? "#5B9BD5" : "#EDEAE3",
+                  }}
+                >
+                  {t.method}
+                </td>
                 <td style={styles.td}>{fmtLabel(t.ts, timeframe)}</td>
                 <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(t.predicted)}</td>
                 <td style={{ ...styles.td, textAlign: "right" }}>{fmtPrice(t.actual)}</td>
@@ -1015,7 +1225,8 @@ function PredictionAccuracyCard({ log, timeframe }) {
         새 예측은 최소 {timeframe === "hourly" ? "10분" : "1일"} 간격으로만 저장됩니다. 각 방법은 자기 예상
         변화율이 {timeframe === "hourly" ? "0.3%" : "1.0%"} 미만으로 방향이 애매하면 그 방법만 독립적으로
         건너뜁니다 (선형회귀는 저장되고 홀트는 안 될 수도, 반대도 가능). 점수 규칙은 1h:1점 · 2h:2점 · 3h:3점,
-        이후 2배가 될 때마다 +1점(최대 30점) · 오답 -7점입니다. 이 기기(브라우저)에만 저장됩니다.
+        이후 2배가 될 때마다 +1점(최대 30점) · 오답 -7점입니다. "종합 판정"은 세 방법의 지금까지 누적 점수를
+        가중치로 써서 현재 진행 중인 방향을 합산한 참고 지표입니다. 이 기기(브라우저)에만 저장됩니다.
       </div>
     </section>
   );
