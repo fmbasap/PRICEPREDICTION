@@ -13,8 +13,8 @@ import { RefreshCw, TrendingUp, TrendingDown, Minus, AlertTriangle } from "lucid
 import { supabase, supabaseDebugInfo } from "./supabaseClient";
 
 const ASSETS = {
-  FLR: { id: "flare-networks", label: "Flare", ticker: "FLR", accent: "#E8A33D", currency: "usd", futuresSymbol: "FLRUSDT" },
   XRP: { id: "ripple", label: "XRP", ticker: "XRP", accent: "#4FD1C5", currency: "usd", futuresSymbol: "XRPUSDT" },
+  FLR: { id: "flare-networks", label: "Flare", ticker: "FLR", accent: "#E8A33D", currency: "usd", futuresSymbol: "FLRUSDT" },
 };
 
 // ---- 시나리오 대결: 김광석 교수(금리인하) vs 현재 컨센서스(금리인상 66%) ----
@@ -675,16 +675,56 @@ export default function CryptoTrendDashboard() {
     let log = loadUserPredLog(asset);
     // 사용자가 자유롭게 목표시점을 고르므로, 넉넉하게(12시간) 허용오차를 둠
     const { log: resolvedLog, changed } = resolveUserPredLog(log, cache[asset], 12 * 60 * 60 * 1000);
-    if (changed) saveUserPredLog(asset, resolvedLog);
+    if (changed) {
+      saveUserPredLog(asset, resolvedLog);
+      // 이번에 새로 확정(resolved)된 것들 중 서버에도 등록돼있던(supabaseId 있는) 항목은
+      // 점수를 계산해서 서버에도 반영 -> 랭킹에 집계됨
+      if (supabase && session) {
+        resolvedLog.forEach((t) => {
+          const prev = log.find((p) => p.id === t.id);
+          if (t.resolved && (!prev || !prev.resolved) && t.supabaseId) {
+            const predictedDir = t.predicted - t.basePrice;
+            const actualDir = t.actual - t.basePrice;
+            const isFlat = Math.abs(predictedDir) < 1e-9 || Math.abs(actualDir) < 1e-9;
+            const isHit = !isFlat && Math.sign(predictedDir) === Math.sign(actualDir);
+            const horizonHours = Math.max(0.01, (t.targetTs - t.createdAt) / (60 * 60 * 1000));
+            const weight = getHorizonWeight(horizonHours);
+            const points = isFlat ? 0 : isHit ? weight : -7;
+            supabase.rpc("resolve_my_prediction", { p_id: t.supabaseId, p_actual: t.actual, p_points: points });
+          }
+        });
+      }
+    }
     setUserPredLog(resolvedLog);
-  }, [cache, asset]);
+  }, [cache, asset, session]);
 
-  const addUserPrediction = (predictedPrice, targetDateTimeLocal) => {
+  const addUserPrediction = async (predictedPrice, targetDateTimeLocal) => {
     if (!analysis) return { ok: false, message: "현재가를 아직 못 불러왔습니다" };
     const targetTs = new Date(targetDateTimeLocal).getTime();
     if (!targetTs || Number.isNaN(targetTs)) return { ok: false, message: "목표 시점을 확인해주세요" };
     if (targetTs <= Date.now()) return { ok: false, message: "목표 시점은 미래여야 합니다" };
     if (!predictedPrice || Number.isNaN(predictedPrice)) return { ok: false, message: "예측 가격을 입력해주세요" };
+
+    let supabaseId = null;
+    // 로그인 상태면 서버에도 같이 등록해서, 랭킹에 반영될 수 있게 함
+    if (supabase && session) {
+      try {
+        const { data, error } = await supabase
+          .from("user_predictions")
+          .insert({
+            user_id: session.user.id,
+            asset,
+            target_ts: new Date(targetTs).toISOString(),
+            base_price: analysis.currentPrice,
+            predicted: predictedPrice,
+          })
+          .select("id")
+          .single();
+        if (!error && data) supabaseId = data.id;
+      } catch {
+        // 서버 저장 실패해도 로컬 기록은 그대로 진행 (랭킹 반영만 안 됨)
+      }
+    }
 
     const entry = {
       id: `${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -694,11 +734,28 @@ export default function CryptoTrendDashboard() {
       predicted: predictedPrice,
       actual: null,
       resolved: false,
+      supabaseId,
     };
     const next = [...userPredLog, entry];
     saveUserPredLog(asset, next);
     setUserPredLog(next);
     return { ok: true };
+  };
+
+  // 아직 목표 시점이 지나지 않은(resolved=false) 내 예측만 취소 가능
+  const cancelUserPrediction = async (id) => {
+    const target = userPredLog.find((t) => t.id === id);
+    if (!target || target.resolved) return; // 이미 채점된 건 취소 불가
+    if (target.supabaseId && supabase && session) {
+      try {
+        await supabase.from("user_predictions").delete().eq("id", target.supabaseId);
+      } catch {
+        // 서버 삭제 실패해도 로컬은 지움 (랭킹엔 남을 수 있으나 흔치 않은 경우)
+      }
+    }
+    const next = userPredLog.filter((t) => t.id !== id);
+    saveUserPredLog(asset, next);
+    setUserPredLog(next);
   };
 
   return (
@@ -906,8 +963,12 @@ export default function CryptoTrendDashboard() {
               timeframe={timeframe}
               userPredLog={userPredLog}
               onAddUserPrediction={addUserPrediction}
+              onCancelUserPrediction={cancelUserPrediction}
               currentPrice={analysis.currentPrice}
+              session={session}
             />
+
+            <LeaderboardPanel />
 
             <section style={styles.signalGrid}>
               <SignalCard
@@ -1126,7 +1187,15 @@ function MethodScoreBlock({ title, color, m, timeframe }) {
   );
 }
 
-function PredictionAccuracyCard({ log, timeframe, userPredLog, onAddUserPrediction, currentPrice }) {
+function PredictionAccuracyCard({
+  log,
+  timeframe,
+  userPredLog,
+  onAddUserPrediction,
+  onCancelUserPrediction,
+  currentPrice,
+  session,
+}) {
   const linear = scoreMethod(log, "targets");
   const holt = scoreMethod(log, "holtTargets");
   const user = scoreUserPredictions(userPredLog || []);
@@ -1174,11 +1243,11 @@ function PredictionAccuracyCard({ log, timeframe, userPredLog, onAddUserPredicti
   const [formError, setFormError] = useState(null);
   const [formSuccess, setFormSuccess] = useState(false);
 
-  const submitPrediction = () => {
+  const submitPrediction = async () => {
     setFormError(null);
     setFormSuccess(false);
     const price = parseFloat(priceInput);
-    const result = onAddUserPrediction(price, timeInput);
+    const result = await onAddUserPrediction(price, timeInput);
     if (!result.ok) {
       setFormError(result.message);
     } else {
@@ -1210,6 +1279,11 @@ function PredictionAccuracyCard({ log, timeframe, userPredLog, onAddUserPredicti
 
       <div style={{ borderTop: "1px solid #232B27", paddingTop: 12, marginBottom: 12 }}>
         <div style={{ ...styles.posLabel, marginBottom: 8 }}>내 예측 등록하기</div>
+        {!session && (
+          <div style={{ ...styles.posNote, color: "#5B9BD5", marginBottom: 8 }}>
+            로그인하면 등록한 예측이 공개 랭킹에도 같이 반영됩니다 (비로그인 시 이 기기에만 기록).
+          </div>
+        )}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
           <input
             type="number"
@@ -1232,6 +1306,49 @@ function PredictionAccuracyCard({ log, timeframe, userPredLog, onAddUserPredicti
         {formError && <div style={{ ...styles.posNote, color: "#E2604F", marginTop: 6 }}>{formError}</div>}
         {formSuccess && <div style={{ ...styles.posNote, color: "#6FCB9F", marginTop: 6 }}>등록됐습니다. 목표 시점이 지나면 자동으로 채점됩니다.</div>}
       </div>
+
+      {(userPredLog || []).filter((t) => !t.resolved).length > 0 && (
+        <div style={{ borderTop: "1px solid #232B27", paddingTop: 12, marginBottom: 12 }}>
+          <div style={{ ...styles.posLabel, marginBottom: 8 }}>대기 중인 내 예측</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {[...userPredLog]
+              .filter((t) => !t.resolved)
+              .sort((a, b) => a.targetTs - b.targetTs)
+              .map((t) => (
+                <div
+                  key={t.id}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    gap: 8,
+                    fontSize: 12,
+                  }}
+                >
+                  <span style={{ color: "#C7CCC8" }}>
+                    {new Date(t.targetTs).toLocaleString("ko-KR", {
+                      month: "2-digit",
+                      day: "2-digit",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                    까지 {fmtPrice(t.predicted)}
+                  </span>
+                  {t.targetTs > Date.now() ? (
+                    <button
+                      onClick={() => onCancelUserPrediction(t.id)}
+                      style={{ ...styles.accountBtnGhost, padding: "3px 8px", fontSize: 10 }}
+                    >
+                      취소
+                    </button>
+                  ) : (
+                    <span style={{ ...styles.pmMetaSub, flexShrink: 0 }}>검증 대기 중</span>
+                  )}
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
 
       {recentAll.length === 0 ? (
         <div style={styles.newsEmpty}>
@@ -3305,6 +3422,101 @@ function CheckpointSummaryPanel() {
           </div>
         );
       })}
+    </section>
+  );
+}
+
+function LeaderboardPanel() {
+  const [board, setBoard] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const fetchBoard = async () => {
+    if (!supabase) {
+      setError("로그인 기능이 준비되지 않아 랭킹을 불러올 수 없습니다");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const { data, error } = await supabase.rpc("get_leaderboard");
+      if (error) throw error;
+      setBoard(data || []);
+    } catch (e) {
+      setError(e.message || "랭킹을 불러오지 못했습니다");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchBoard();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <section style={styles.newsCard}>
+      <div style={styles.newsHeader}>
+        <div style={styles.tableTitle}>🏆 예측 랭킹 (내 직접 예측, 전체 참여자)</div>
+        <button onClick={fetchBoard} style={styles.newsBtn} disabled={loading}>
+          <RefreshCw size={12} style={{ animation: loading ? "spin 1s linear infinite" : "none" }} />
+          갱신
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ ...styles.errorBox, marginBottom: 0 }}>
+          <AlertTriangle size={14} />
+          <span>{error}</span>
+        </div>
+      )}
+
+      {board && board.length === 0 && (
+        <div style={styles.newsEmpty}>
+          아직 랭킹에 오른 참여자가 없습니다. 로그인 후 "내 예측 등록하기"에서 직접 예측을 남기고, 목표 시점이
+          지나면 여기 반영됩니다.
+        </div>
+      )}
+
+      {board && board.length > 0 && (
+        <table style={styles.table}>
+          <thead>
+            <tr>
+              <th style={styles.th}>순위</th>
+              <th style={styles.th}>참여자</th>
+              <th style={{ ...styles.th, textAlign: "right" }}>점수</th>
+              <th style={{ ...styles.th, textAlign: "right" }}>적중/검증</th>
+            </tr>
+          </thead>
+          <tbody>
+            {board.map((row, i) => (
+              <tr key={i} style={i % 2 === 1 ? styles.trAlt : undefined}>
+                <td style={styles.td}>{i + 1}</td>
+                <td style={styles.td}>{row.display_name}</td>
+                <td
+                  style={{
+                    ...styles.td,
+                    textAlign: "right",
+                    color: row.total_points >= 0 ? "#6FCB9F" : "#E2604F",
+                    fontWeight: 600,
+                  }}
+                >
+                  {row.total_points >= 0 ? "+" : ""}
+                  {row.total_points}
+                </td>
+                <td style={{ ...styles.td, textAlign: "right" }}>
+                  {row.hit_count}/{row.resolved_count}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <div style={{ ...styles.posNote, marginTop: 10 }}>
+        "내 직접 예측"에 로그인 후 등록한 예측만 랭킹에 집계됩니다. 참여자 이름은 이메일 앞 3자리만 표시됩니다
+        (예: abc***). 점수 규칙은 위 "예측 정확도 기록"과 동일합니다.
+      </div>
     </section>
   );
 }
