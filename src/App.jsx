@@ -1024,12 +1024,26 @@ function getHorizonWeight(hours) {
 }
 
 // 하나의 target 배열(선형 또는 홀트)에 대해 MAPE/편향/자기강화 점수를 계산
+// 같은 목표 시점(ts)을 겨냥한 예측이 여러 번(예: 시간별 10분 간격 재저장) 쌓인 경우,
+// 채점 시엔 그중 가장 나중에(더 최신 정보로) 만들어진 예측 하나만 대표로 씀 - 중복 과채점 방지.
+function dedupeByTargetTs(resolved) {
+  const byTs = new Map();
+  resolved.forEach((t) => {
+    const existing = byTs.get(t.ts);
+    if (!existing || t.createdAt > existing.createdAt) {
+      byTs.set(t.ts, t);
+    }
+  });
+  return Array.from(byTs.values());
+}
+
 function scoreMethod(log, key) {
-  const resolved = log.flatMap((batch) =>
+  const resolvedRaw = log.flatMap((batch) =>
     (batch[key] || [])
       .filter((t) => t.resolved)
       .map((t) => ({ ...t, createdAt: batch.createdAt, basePrice: batch.basePrice }))
   );
+  const resolved = dedupeByTargetTs(resolvedRaw);
   const pendingCount = log.reduce((sum, b) => sum + (b[key] || []).filter((t) => !t.resolved).length, 0);
 
   const errors = resolved.map((t) => ((t.actual - t.predicted) / t.predicted) * 100);
@@ -1057,7 +1071,8 @@ function scoreMethod(log, key) {
 
 // 사용자 직접 예측(평평한 배열, ts 대신 targetTs)용 채점 - 로직은 scoreMethod와 동일
 function scoreUserPredictions(userPredLog) {
-  const resolved = userPredLog.filter((t) => t.resolved).map((t) => ({ ...t, ts: t.targetTs }));
+  const resolvedRaw = userPredLog.filter((t) => t.resolved).map((t) => ({ ...t, ts: t.targetTs }));
+  const resolved = dedupeByTargetTs(resolvedRaw);
   const pendingCount = userPredLog.filter((t) => !t.resolved).length;
 
   const errors = resolved.map((t) => ((t.actual - t.predicted) / t.predicted) * 100);
@@ -1265,11 +1280,13 @@ function PredictionAccuracyCard({ log, timeframe, userPredLog, onAddUserPredicti
       )}
 
       <div style={{ ...styles.posNote, marginTop: 10 }}>
-        새 예측은 최소 {timeframe === "hourly" ? "10분" : "1일"} 간격으로만 저장됩니다. 각 방법은 자기 예상
-        변화율이 {timeframe === "hourly" ? "0.3%" : "1.0%"} 미만으로 방향이 애매하면 그 방법만 독립적으로
-        건너뜁니다 (선형회귀는 저장되고 홀트는 안 될 수도, 반대도 가능). 점수 규칙은 1h:1점 · 2h:2점 · 3h:3점,
-        이후 2배가 될 때마다 +1점(최대 30점) · 오답 -7점입니다. "종합 판정"은 세 방법의 지금까지 누적 점수를
-        가중치로 써서 현재 진행 중인 방향을 합산한 참고 지표입니다. 이 기기(브라우저)에만 저장됩니다.
+        새 예측은 최소 {timeframe === "hourly" ? "10분" : "1일"} 간격으로만 저장됩니다. 같은 목표 시점을 겨냥한
+        예측이 여러 번 쌓이면(예: 시간별 10분마다 재저장), 채점 시엔 그중 가장 나중에 만들어진 예측 하나만
+        대표로 씁니다 (중복 과채점 방지). 각 방법은 자기 예상 변화율이{" "}
+        {timeframe === "hourly" ? "0.3%" : "1.0%"} 미만으로 방향이 애매하면 그 방법만 독립적으로 건너뜁니다
+        (선형회귀는 저장되고 홀트는 안 될 수도, 반대도 가능). 점수 규칙은 1h:1점 · 2h:2점 · 3h:3점, 이후 2배가
+        될 때마다 +1점(최대 30점) · 오답 -7점입니다. "종합 판정"은 세 방법의 지금까지 누적 점수를 가중치로 써서
+        현재 진행 중인 방향을 합산한 참고 지표입니다. 이 기기(브라우저)에만 저장됩니다.
       </div>
     </section>
   );
